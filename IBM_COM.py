@@ -9,7 +9,7 @@ python_version = 0x30b0ff0
 
 import win32com.client.CLSIDToClass, pythoncom, pywintypes
 import win32com.client.util
-from pywintypes import IID
+from pywintypes import IIDfd
 from win32com.client import Dispatch
 
 # The following 3 lines may need tweaking for the particular server

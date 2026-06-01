@@ -1,68 +1,91 @@
-"""
-基本的数据结构定义
-  - `CTypeInfo`
-  - `FunctionArgument`
-  - `MacroSpec`
-  - `VariableSpec`
-  - `FunctionSpec`
-  - `ActivityNode`
-  - `ActivityEdge`
-  - `ActivityGraph`
-  author: Li,Zhiying
-  data:2026/5/27
-"""
-from pydantic import BaseModel,ConfigDict,Field
-from typing import Literal
+"""Shared data contracts for C analysis, XMI generation, and Rhapsody sync."""
 
-class CTypeInfo(BaseModel):
-    """CTypeInfo,当前代码中使用到的数据类型"""
-    base_type:str = Field(...,description="变量声明去除所有修饰符后的基础类型,如T_UBYTE")
-    is_const:bool=False
-    is_static:bool = False
-    pointer_modifier: str = ""
-    array_multiplicity: str = ""
-    raw_declaration: str = ""
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class FunctionArgument(BaseModel):
-    """FunctionArgument 函数参数相关的数据定义"""
-    name:str = ""
+class StrictModel(BaseModel):
+    """Reject unexpected fields so integration mistakes fail early."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CTypeInfo(StrictModel):
+    """Structured representation of a C declaration type."""
+
+    base_type: str = Field(..., min_length=1, description="Base type without modifiers, for example T_UBYTE.")
+    is_const: bool = Field(False, description="Whether the declaration contains const.")
+    is_static: bool = Field(False, description="Whether the declaration contains static.")
+    pointer_modifier: str = Field("", description="Pointer modifier such as *, **, or an empty string.")
+    array_multiplicity: str = Field("", description="Array size such as 10 or 5][10.")
+    raw_declaration: str = Field("", description="Original C declaration.")
+
+
+class FunctionArgument(StrictModel):
+    """A function argument and its C type."""
+
+    name: str = Field(..., min_length=1, description="Argument name.")
     type_info: CTypeInfo
 
-class FunctionSpec(BaseModel):
-    """函数签名"""
-    name:str
-    arguments: list[FunctionArgument] = Field(default_factory=list, description="函数参数列表")
-    return_type_info:CTypeInfo 
 
-class MacroSpec(BaseModel):
-    """宏定义相关的数据定义"""
-    name:str 
-    type_info: CTypeInfo | None = None 
-    value:str = ""
-    raw_declaration: str = ""
+class FunctionSpec(StrictModel):
+    """A C function signature."""
 
-class VariableSpec(BaseModel):
-    """变量定义相关的数据定义"""
-    name:str
-    type_info : CTypeInfo
-    initial_value: str | None = None
-    raw_declaration: str = ""
+    name: str = Field(..., min_length=1, description="Function name.")
+    arguments: List[FunctionArgument] = Field(default_factory=list, description="Ordered function arguments.")
+    return_type_info: CTypeInfo
 
-class ActivityNode(BaseModel):
-    id: str = Field(..., description="节点唯一 ID,只使用英文字母、数字和下划线,例如 n1、decision_1、return_ok")
-    type: Literal["Initial", "Action", "Decision", "Merge", "Final"] = Field(
-        ...,
-        description="activity node's type"
-    )
-    label: str = Field("", description="图上显示的短文本")
-    description: str = Field("", description="节点对应的代码片段或语义说明")
 
-class ActivityEdge(BaseModel):
-    source:str 
-    target:str
-    guard: str=Field("",description="如果起点是decision需要填写true,false或者switch具体的case")
+class MacroSpec(StrictModel):
+    """A simple C macro definition."""
 
-class ActivityGraph(BaseModel):
-    nodes: list[ActivityNode] = Field(default_factory=list)
-    edges:list[ActivityEdge]=Field(default_factory=list)
+    name: str = Field(..., min_length=1, description="Macro name.")
+    type_info: Optional[CTypeInfo] = Field(None, description="Optional inferred C type.")
+    value: str = Field("", description="Macro value or expression.")
+    raw_declaration: str = Field("", description="Original #define declaration.")
+
+
+class VariableSpec(StrictModel):
+    """A C variable definition."""
+
+    name: str = Field(..., min_length=1, description="Variable name.")
+    type_info: CTypeInfo
+    initial_value: Optional[str] = Field(None, description="Optional initial value.")
+    raw_declaration: str = Field("", description="Original C declaration.")
+
+
+ActivityNodeType = Literal["Initial", "Action", "Decision", "Merge", "Final"]
+
+
+class ActivityNode(StrictModel):
+    """A node in an activity graph."""
+
+    id: str = Field(..., min_length=1, description="Unique node id referenced by edge source and target.")
+    type: ActivityNodeType = Field(..., description="Activity node type.")
+    label: str = Field("", description="Short text displayed in the diagram.")
+    description: str = Field("", description="Related code fragment or semantic description.")
+
+
+class ActivityEdge(StrictModel):
+    """A directed control-flow edge in an activity graph."""
+
+    source: str = Field(..., min_length=1, description="Source node id.")
+    target: str = Field(..., min_length=1, description="Target node id.")
+    guard: str = Field("", description="Optional branch guard, for example true, false, or a switch case.")
+
+
+class ActivityGraph(StrictModel):
+    """A function-level activity graph."""
+
+    nodes: List[ActivityNode] = Field(default_factory=list)
+    edges: List[ActivityEdge] = Field(default_factory=list)
+
+
+class ElementSummary(StrictModel):
+    """Serializable summary of a Rhapsody model element."""
+
+    name: str
+    meta_class: str
+    path: str = ""
+    created: bool = False

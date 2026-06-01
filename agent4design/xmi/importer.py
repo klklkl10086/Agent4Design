@@ -1,109 +1,123 @@
-from pydantic import BaseModel
+"""Import XMI artifacts with the Rhapsody XMI Toolkit."""
 
+from pathlib import Path
 import os
-import glob
 import subprocess
+from typing import List, Optional, Union
+
+from pydantic import BaseModel
 
 
 class XMIImportResult(BaseModel):
+    """Structured result returned by an XMI Toolkit invocation."""
+
     xmi_path: str
     success: bool
-    return_code: int | None = None
+    return_code: Optional[int] = None
     stdout: str = ""
     stderr: str = ""
-    log_path: str | None = None
+    log_path: Optional[str] = None
 
-    
+
+def _write_log(log_dir: Union[str, Path], xmi_path: Path, stdout: str, stderr: str) -> str:
+    output_dir = Path(log_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = (output_dir / f"{xmi_path.name}.log").resolve()
+    log_path.write_text(f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}", encoding="utf-8")
+    return str(log_path)
 
 
 def import_xmi_file(
-    xmi_path: str,
-    toolkit_bat: str,
-    log_dir: str = "xmi_import_logs",
+    xmi_path: Union[str, Path],
+    toolkit_bat: Union[str, Path],
+    log_dir: Union[str, Path] = "xmi_import_logs",
     timeout: int = 600,
 ) -> XMIImportResult:
-    if not os.path.isfile(toolkit_bat):
-        return XMIImportResult(xmi_path=xmi_path, success=False, stderr=f"Toolkit not found: {toolkit_bat}")
+    """Import one XMI file and capture enough detail to diagnose failures."""
+    source_path = Path(xmi_path).resolve()
+    toolkit_path = Path(toolkit_bat).resolve()
 
-    if not os.path.isfile(xmi_path):
-        return XMIImportResult(xmi_path=xmi_path, success=False, stderr=f"XMI file not found: {xmi_path}")
-    
-    cmd = [
-            toolkit_bat,
-            "-silent", "true",
-            "-mode", "IMPORT",
-            "-format", "uml21",
-            "-xmi", xmi_path
-        ]
+    if not toolkit_path.is_file():
+        return XMIImportResult(
+            xmi_path=str(source_path),
+            success=False,
+            stderr=f"Toolkit not found: {toolkit_path}",
+        )
+    if not source_path.is_file():
+        return XMIImportResult(
+            xmi_path=str(source_path),
+            success=False,
+            stderr=f"XMI file not found: {source_path}",
+        )
+
+    command = [
+        str(toolkit_path),
+        "-silent",
+        "true",
+        "-mode",
+        "IMPORT",
+        "-format",
+        "uml21",
+        "-xmi",
+        str(source_path),
+    ]
+
     try:
-        os.makedirs(log_dir, exist_ok=True)
-        # 执行命令，捕获输出（可选，但建议重定向到日志文件）
         result = subprocess.run(
-            cmd,
+            command,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
-            env=os.environ.copy()  # 继承当前环境变量
+            env=os.environ.copy(),
         )
-        code = result.returncode
-        if code == 0:
-            return XMIImportResult(
-                xmi_path=xmi_path,
-                success=True,
-                return_code=code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                )
-        else:
-            log_file = os.path.join(log_dir, f"{os.path.basename(xmi_path)}.log")
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}")
-            return XMIImportResult(
-                xmi_path=xmi_path,
-                success=False,
-                return_code=code,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                log_path=log_file)
-        
-    
-    except subprocess.TimeoutExpired as e:
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or f"Import timed out after {timeout}s"
+        log_path = _write_log(log_dir, source_path, stdout, stderr)
         return XMIImportResult(
-            xmi_path=xmi_path,
+            xmi_path=str(source_path),
             success=False,
-            stderr=f"Import timed out after {timeout}s",
+            stdout=stdout,
+            stderr=stderr,
+            log_path=log_path,
         )
-    except Exception as e:
+    except Exception as exc:
+        stderr = str(exc)
+        log_path = _write_log(log_dir, source_path, "", stderr)
         return XMIImportResult(
-            xmi_path=xmi_path,
+            xmi_path=str(source_path),
             success=False,
-            stderr=str(e),
+            stderr=stderr,
+            log_path=log_path,
         )
 
-        
+    log_path = None
+    if result.returncode != 0:
+        log_path = _write_log(log_dir, source_path, result.stdout, result.stderr)
 
-            
+    return XMIImportResult(
+        xmi_path=str(source_path),
+        success=result.returncode == 0,
+        return_code=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        log_path=log_path,
+    )
+
+
 def import_xmi_folder(
-    xmi_folder: str,
-    toolkit_bat: str,
-    log_dir: str = "xmi_import_logs",
-) -> list[XMIImportResult]:
-    if not os.path.isfile(toolkit_bat):
-        return []
-        
-    xmi_files = glob.glob(os.path.join(xmi_folder, "*.xmi"))
-    if not xmi_files:
-        return []
-    
-    os.makedirs(log_dir, exist_ok=True)
+    xmi_folder: Union[str, Path],
+    toolkit_bat: Union[str, Path],
+    log_dir: Union[str, Path] = "xmi_import_logs",
+    timeout: int = 600,
+) -> List[XMIImportResult]:
+    """Import every XMI file in a folder in a deterministic order."""
+    folder_path = Path(xmi_folder).resolve()
+    if not folder_path.is_dir():
+        raise FileNotFoundError(f"XMI folder not found: {folder_path}")
 
-    res = []
-    for i, xmi_path in enumerate(xmi_files, 1):
-        print(f"\n[{i}/{len(xmi_files)}] 正在导入: {os.path.basename(xmi_path)}")
-        r = import_xmi_file(xmi_path,toolkit_bat,log_dir)
-        res.append(r)
-
-    return res
-
-        
-    
+    return [
+        import_xmi_file(xmi_path, toolkit_bat, log_dir, timeout)
+        for xmi_path in sorted(folder_path.glob("*.xmi"))
+    ]

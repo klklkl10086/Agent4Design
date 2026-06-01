@@ -141,7 +141,13 @@ agent4design/
     com_runtime.py
     context.py
     repository.py
+    type_registry.py
     verifier.py
+
+  services/
+    model_sync.py
+    activity_sync.py
+    agent_service.py
 
   xmi/
     activity.py
@@ -168,6 +174,21 @@ ActivityGraph -> XMI
 ```
 
 Later, if experiments prove that XMI can safely create functions or variables, the policy can be changed without rewriting the rest of the system.
+
+## Agent Boundary
+
+The local Agent entry point is `services/agent_service.py`. It exposes validated
+JSON-schema tools without depending on LangChain, LangGraph, or MCP.
+
+```text
+Agent adapter
+  -> Agent4DesignService
+  -> ModelSyncService or ActivitySyncService
+  -> RhapsodyRepository or XMI Toolkit
+```
+
+Framework adapters should stay thin. COM calls and XMI generation belong in the
+infrastructure modules, not in Agent prompts or tool decorators.
 
 ## First Implementation Step
 

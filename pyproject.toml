@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent4design"
+version = "0.1.0"
+description = "Rhapsody COM and XMI synchronization services with local API adapters."
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2,<3",
+]
+
+[project.optional-dependencies]
+rhapsody = [
+  "pywin32>=306; platform_system == 'Windows'",
+]
+mcp = [
+  "mcp[cli]>=1,<2",
+]
+graph = [
+  "langgraph>=0.4,<2",
+  "langgraph-checkpoint-sqlite>=2,<4",
+]
+llm = [
+  "openai>=1,<3",
+]
+dev = [
+  "pytest>=8,<10",
+]
+
+[project.scripts]
+agent4design-api = "agent4design.adapters.http.server:main"
+agent4design-agent = "agent4design.adapters.llm.cli:main"
+agent4design-mcp = "agent4design.adapters.mcp.server:main"
+
+[tool.setuptools.packages.find]
+include = ["agent4design*"]

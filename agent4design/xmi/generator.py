@@ -1,115 +1,157 @@
-"""
-根据code生成xmi文件
-  author: Li,Zhiying
-  data:2026/5/27
-"""
-import os
+"""Generate UML 2.1 activity XMI artifacts from validated activity graphs."""
+
+from pathlib import Path
+from typing import Dict, Set, Union
 import uuid
-import re
+import xml.etree.ElementTree as ET
+
+from agent4design.domain.models import ActivityGraph, FunctionSpec
+from agent4design.domain.validators import validate_activity_graph
+from agent4design.tools.tool import sanitize_identifier
 
 
-from domain import models
-from typing import Optional, List, Dict, Any, Tuple
-from jinja2 import Template
+XMI_NS = "http://schema.omg.org/spec/XMI/2.1"
+UML_NS = "http://schema.omg.org/spec/UML/2.1"
+
+ET.register_namespace("xmi", XMI_NS)
+ET.register_namespace("uml", UML_NS)
 
 
-
-# 官方模板
-XMI_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
-<xmi:XMI xmi:version="2.1" xmlns:uml="http://schema.omg.org/spec/UML/2.1" xmlns:xmi="http://schema.omg.org/spec/XMI/2.1">
-  <uml:Package xmi:id="Pkg_tmp" name="{{ function_name }}">
-    <packagedElement xmi:type="uml:Activity" xmi:id="{{ act_id }}" name="activity_{{ function_name }}">
-
-      {% for node in nodes %}
-      {% if node.type == 'Action' %}
-      <node xmi:type="uml:OpaqueAction" xmi:id="{{ node.id }}" name="{{ node.name }}">
-        <body>{{ node.desc | e }}</body>
-      </node>
-      {% elif node.type == 'Decision' %}
-      <node xmi:type="uml:DecisionNode" xmi:id="{{ node.id }}" name="{{ node.name }}"/>
-      {% elif node.type == 'Merge' %}
-      <node xmi:type="uml:MergeNode" xmi:id="{{ node.id }}" name="{{ node.name }}"/>
-      {% elif node.type == 'Initial' %}
-      <node xmi:type="uml:InitialNode" xmi:id="{{ node.id }}" name="{{ node.name }}"/>
-      {% elif node.type == 'Final' %}
-      <node xmi:type="uml:ActivityFinalNode" xmi:id="{{ node.id }}" name="{{ node.name }}"/>
-      {% endif %}
-      {% endfor %}
-
-      {% for edge in edges %}
-      <edge xmi:type="uml:ControlFlow" xmi:id="{{ edge.id }}" name="{{ loop.index0 }}" source="{{ edge.source }}" target="{{ edge.target }}">
-        {% if edge.guard %}
-        <guard xmi:type="uml:LiteralString" xmi:id="{{ edge.id }}_guard" value="{{ edge.guard | e }}"/>
-        {% endif %}
-        <weight xmi:type="uml:LiteralInteger" xmi:id="{{ edge.id }}_weight" value="1"/>
-      </edge>
-      {% endfor %}
-
-    </packagedElement>
-  </uml:Package>
-</xmi:XMI>
-"""
-
-def sanitize(raw: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", raw or "")
-    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-    if not cleaned:
-        cleaned = "unnamed"
-    if cleaned[0].isdigit():
-        cleaned = f"n_{cleaned}"
-    return cleaned
-    
+def _xmi(attribute: str) -> str:
+    return f"{{{XMI_NS}}}{attribute}"
 
 
+def _uml(element: str) -> str:
+    return f"{{{UML_NS}}}{element}"
+
+
+def _indent_xml(element: ET.Element, level: int = 0) -> None:
+    """Indent XML on Python versions that do not provide ElementTree.indent."""
+    indentation = "\n" + level * "  "
+    child_indentation = "\n" + (level + 1) * "  "
+    if len(element):
+        if not element.text or not element.text.strip():
+            element.text = child_indentation
+        for child in element:
+            _indent_xml(child, level + 1)
+        if not child.tail or not child.tail.strip():
+            child.tail = indentation
+    elif level and (not element.tail or not element.tail.strip()):
+        element.tail = indentation
+
+
+def _build_xmi_node_ids(graph: ActivityGraph) -> Dict[str, str]:
+    """Build XMI ids and reject collisions introduced by sanitization."""
+    result: Dict[str, str] = {}
+    used_ids: Set[str] = set()
+
+    for node in graph.nodes:
+        xmi_id = f"Node_{sanitize_identifier(node.id)}"
+        if xmi_id in used_ids:
+            raise ValueError(f"Node ids collide after sanitization: {node.id}")
+        result[node.id] = xmi_id
+        used_ids.add(xmi_id)
+
+    return result
+
+
+def _add_activity_node(activity: ET.Element, node_id: str, node_type: str, name: str, description: str) -> None:
+    xmi_type_by_node_type = {
+        "Action": "uml:OpaqueAction",
+        "Decision": "uml:DecisionNode",
+        "Merge": "uml:MergeNode",
+        "Initial": "uml:InitialNode",
+        "Final": "uml:ActivityFinalNode",
+    }
+    node = ET.SubElement(
+        activity,
+        "node",
+        {
+            _xmi("type"): xmi_type_by_node_type[node_type],
+            _xmi("id"): node_id,
+            "name": name,
+        },
+    )
+    if node_type == "Action":
+        ET.SubElement(node, "body").text = description
 
 
 def generate_activity_xmi(
-        function_spec:models.FunctionSpec,
-        graph:models.ActivityGraph,
-        output_dir:str
-)->str:
-  """提取C代码逻辑并直接生成符合 Rhapsody 标准的 XMI 文件，替代手动绘图"""
-  function_name = sanitize(function_spec.name)
-  graph_dict = graph.model_dump()
+    function_spec: FunctionSpec,
+    graph: ActivityGraph,
+    output_dir: Union[str, Path] = "xmi_read",
+) -> str:
+    """Generate an activity XMI file and return its absolute path."""
+    validate_activity_graph(graph)
 
-  # 0. 确认图的正确性
-  # 1. 把节点转换成 XMI 节点数据 nodes_data
-  act_id = f"GUID_{uuid.uuid4().hex}"
-  nodes_data = []
-  for n in graph_dict.get("nodes", []):
-      nid = sanitize(n["id"])
-      nodes_data.append({
-          "id": f"Node_{nid}",
-          "type": n["type"],
-          "name": f"{n['type']}_{nid}",
-          "desc": n.get("description")
-      })
-   # 2. 把有向边转换成 XMI 节点数据 edges_data
-  edges_data = []
-  for idx, e in enumerate(graph_dict.get("edges", [])):
-      s = e.get("source")
-      t = e.get("target")
-      guard = e.get("guard")
-      
-      edges_data.append({
-          "id": f"Edge_{idx}_{uuid.uuid4().hex[:6]}",
-          "source": f"Node_{sanitize(s)}",
-          "target": f"Node_{sanitize(t)}",
-          "guard": guard
-      })
+    function_name = sanitize_identifier(function_spec.name)
+    node_ids = _build_xmi_node_ids(graph)
+    unique_suffix = uuid.uuid4().hex
 
-  # 2. 渲染 Jinja2 XMI 模板
-  template = Template(XMI_TEMPLATE)
-  xmi_content = template.render(
-      function_name=function_name,
-      act_id=act_id,
-      nodes=nodes_data,
-      edges=edges_data
-  )
+    root = ET.Element(_xmi("XMI"), {_xmi("version"): "2.1"})
+    package = ET.SubElement(
+        root,
+        _uml("Package"),
+        {
+            _xmi("id"): f"Package_{unique_suffix}",
+            "name": function_name,
+        },
+    )
+    activity = ET.SubElement(
+        package,
+        "packagedElement",
+        {
+            _xmi("type"): "uml:Activity",
+            _xmi("id"): f"Activity_{unique_suffix}",
+            "name": f"activity_{function_name}",
+        },
+    )
 
-  # 3. 输出并保存XMI
-  os.makedirs(output_dir, exist_ok=True)
-  xmi_path = os.path.join(output_dir, f"{function_name}.xmi")
-  with open(xmi_path, "w", encoding="utf-8") as f:
-      f.write(xmi_content)
-  return xmi_path
+    for node in graph.nodes:
+        _add_activity_node(
+            activity,
+            node_ids[node.id],
+            node.type,
+            node.label or f"{node.type}_{sanitize_identifier(node.id)}",
+            node.description,
+        )
+
+    for index, edge in enumerate(graph.edges):
+        edge_id = f"Edge_{index}_{uuid.uuid4().hex[:8]}"
+        edge_element = ET.SubElement(
+            activity,
+            "edge",
+            {
+                _xmi("type"): "uml:ControlFlow",
+                _xmi("id"): edge_id,
+                "name": str(index),
+                "source": node_ids[edge.source],
+                "target": node_ids[edge.target],
+            },
+        )
+        if edge.guard:
+            ET.SubElement(
+                edge_element,
+                "guard",
+                {
+                    _xmi("type"): "uml:LiteralString",
+                    _xmi("id"): f"{edge_id}_guard",
+                    "value": edge.guard,
+                },
+            )
+        ET.SubElement(
+            edge_element,
+            "weight",
+            {
+                _xmi("type"): "uml:LiteralInteger",
+                _xmi("id"): f"{edge_id}_weight",
+                "value": "1",
+            },
+        )
+
+    _indent_xml(root)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    xmi_path = (output_path / f"{function_name}.xmi").resolve()
+    ET.ElementTree(root).write(xmi_path, encoding="utf-8", xml_declaration=True)
+    return str(xmi_path)

@@ -19,8 +19,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
 from pydantic import BaseModel, Field
 
-import threading
-import pythoncom
 import win32com.client
 import concurrent.futures
 from queue import Queue
@@ -356,9 +354,7 @@ def assign_type_from_json(element, type_info: dict, element_meta: str, is_return
     else:
         try: element.setTypeDeclaration(clean_textual_type)
         except: pass
-# ==========================================
-# 🌟 核心进化：为每个工具显式定义参数 Schema
-# ==========================================
+
 
 def get_or_create_argument(op, name: str):
     """专门处理 IRPOperation 的参数创建/查找"""

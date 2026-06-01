@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+dist/
+build/
+xmi_read/
+xmi_import_logs/
+*.sqlite
+*.sqlite3

@@ -174,7 +174,7 @@ class OpenAICompatibleAgent:
         for _ in range(self.max_tool_rounds):
             completion = self.client.chat.completions.create(
                 model=self.model,
-                messages=conversation,
+                messages=list(conversation),
                 tools=tools,
                 tool_choice="auto",
             )

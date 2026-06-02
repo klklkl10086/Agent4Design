@@ -97,3 +97,21 @@ The model Agent uses that same service boundary. It does not call COM directly.
 - Unknown custom types are rejected unless placeholder creation is enabled.
 - Activity XMI import remains disabled by default until ownership mapping is
   validated against an XMI Toolkit export from Rhapsody.
+
+
+# 问题
+### 问题二：函数创建 COM 异常（`-2147221495`）
+- **现象**：前两次执行函数创建均失败，报错 `发生意外 (-2147221495)`
+- **原因**：目标元类为 `Module`，COM 接口无法在该状态下写入
+- **解决**：第三次重试时目标元类自动变更为 `Class`，函数创建成功
+- **建议**：执行写入操作前，确认目标元类为 `Class` 而非 `Module`
+
+---
+
+### 问题三：活动图导入服务未配置
+- **现象**：所有活动图导入尝试均失败，报错 `Activity sync is not configured`
+- **原因**：服务端启动时未加载 **XMI Toolkit** 组件，属于服务端固定配置缺失
+- **解决**：❌ **无法通过重试解决**，需管理员在服务启动时添加以下配置：
+  ```python
+  Agent4DesignService.with_xmi_toolkit(...)
+  ```

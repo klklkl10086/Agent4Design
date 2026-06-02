@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 from typing import Optional
+
+from dotenv import load_dotenv
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -20,6 +23,65 @@ def _env_int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def _env_json(name: str) -> Optional[dict]:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Environment variable {name} must be valid JSON. "
+            f"Current value: {value}"
+        ) from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"Environment variable {name} must be a JSON object. "
+            f"Current value: {value}"
+        )
+
+    return parsed
+
+
+def _load_env_files() -> None:
+    """
+    Load .env files in a stable order.
+
+    Priority:
+    1. Current working directory .env
+       Example: C:\\Users\\uik00187\\Desktop\\Agent4Design\\.env
+
+    2. Project root .env
+       Example: C:\\Users\\uik00187\\Desktop\\Agent4Design\\.env
+
+    3. Package directory .env
+       Example: C:\\Users\\uik00187\\Desktop\\Agent4Design\\agent4design\\.env
+
+    Existing real environment variables are not overwritten.
+    """
+    current_file = Path(__file__).resolve()
+    package_dir = current_file.parent
+    project_root = package_dir.parent
+
+    candidates = [
+        Path.cwd() / ".env",
+        project_root / ".env",
+        package_dir / ".env",
+    ]
+
+    loaded = set()
+    for env_path in candidates:
+        env_path = env_path.resolve()
+        if env_path in loaded:
+            continue
+        loaded.add(env_path)
+
+        if env_path.exists():
+            load_dotenv(dotenv_path=env_path, override=False)
+
+
 @dataclass(frozen=True)
 class Agent4DesignSettings:
     """Runtime settings shared by CLI, MCP, and workflow adapters."""
@@ -28,27 +90,51 @@ class Agent4DesignSettings:
     xmi_output_dir: Path = Path("xmi_read")
     xmi_log_dir: Path = Path("xmi_import_logs")
     xmi_timeout: int = 600
+
     create_placeholder_type: bool = False
     enable_activity_import: bool = False
     require_write_approval: bool = True
+
     mcp_transport: str = "stdio"
     api_host: str = "127.0.0.1"
     api_port: int = 8765
     api_token: Optional[str] = None
+
     llm_api_key: Optional[str] = None
     llm_base_url: Optional[str] = None
     llm_model: Optional[str] = None
     llm_max_tool_rounds: int = 8
+    llm_header: Optional[dict] = None
+
+    # SSL / certificate settings for OpenAI-compatible LLM endpoint.
+    # For your current VIO certificate issue, set:
+    # AGENT4DESIGN_LLM_SSL_VERIFY=false
+    #
+    # For the formal solution, set:
+    # AGENT4DESIGN_LLM_SSL_VERIFY=true
+    # AGENT4DESIGN_LLM_CA_BUNDLE=C:\\path\\to\\vio_root_ca.pem
+    llm_ssl_verify: bool = True
+    llm_ca_bundle: Optional[Path] = None
 
     @classmethod
     def from_env(cls) -> "Agent4DesignSettings":
-        """Load settings without requiring an additional settings package."""
+        """Load settings from .env and process environment variables."""
+
+        _load_env_files()
+
         toolkit = os.getenv("AGENT4DESIGN_XMI_TOOLKIT_BAT", "").strip()
+        ca_bundle = os.getenv("AGENT4DESIGN_LLM_CA_BUNDLE", "").strip()
+
         return cls(
             xmi_toolkit_bat=Path(toolkit) if toolkit else None,
-            xmi_output_dir=Path(os.getenv("AGENT4DESIGN_XMI_OUTPUT_DIR", "xmi_read")),
-            xmi_log_dir=Path(os.getenv("AGENT4DESIGN_XMI_LOG_DIR", "xmi_import_logs")),
+            xmi_output_dir=Path(
+                os.getenv("AGENT4DESIGN_XMI_OUTPUT_DIR", "xmi_read")
+            ),
+            xmi_log_dir=Path(
+                os.getenv("AGENT4DESIGN_XMI_LOG_DIR", "xmi_import_logs")
+            ),
             xmi_timeout=_env_int("AGENT4DESIGN_XMI_TIMEOUT", 600),
+
             create_placeholder_type=_env_bool(
                 "AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE",
                 False,
@@ -61,15 +147,29 @@ class Agent4DesignSettings:
                 "AGENT4DESIGN_REQUIRE_WRITE_APPROVAL",
                 True,
             ),
-            mcp_transport=os.getenv("AGENT4DESIGN_MCP_TRANSPORT", "stdio").strip()
-            or "stdio",
-            api_host=os.getenv("AGENT4DESIGN_API_HOST", "127.0.0.1").strip()
-            or "127.0.0.1",
+
+            mcp_transport=(
+                os.getenv("AGENT4DESIGN_MCP_TRANSPORT", "stdio").strip()
+                or "stdio"
+            ),
+            api_host=(
+                os.getenv("AGENT4DESIGN_API_HOST", "127.0.0.1").strip()
+                or "127.0.0.1"
+            ),
             api_port=_env_int("AGENT4DESIGN_API_PORT", 8765),
-            api_token=os.getenv("AGENT4DESIGN_API_TOKEN", "").strip() or None,
+            api_token=(
+                os.getenv("AGENT4DESIGN_API_TOKEN", "").strip()
+                or None
+            ),
+
+            # LLM key priority:
+            # 1. AGENT4DESIGN_LLM_API_KEY: your project's preferred variable
+            # 2. OPENAI_API_KEY: common OpenAI-compatible variable
+            # 3. API_TOKEN: official VIO template variable
             llm_api_key=(
                 os.getenv("AGENT4DESIGN_LLM_API_KEY", "").strip()
                 or os.getenv("OPENAI_API_KEY", "").strip()
+                or os.getenv("API_TOKEN", "").strip()
                 or None
             ),
             llm_base_url=(
@@ -82,7 +182,17 @@ class Agent4DesignSettings:
                 or os.getenv("OPENAI_MODEL", "").strip()
                 or None
             ),
-            llm_max_tool_rounds=_env_int("AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS", 8),
+            llm_max_tool_rounds=_env_int(
+                "AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS",
+                8,
+            ),
+            llm_header=_env_json("VIO_HEADERS"),
+
+            llm_ssl_verify=_env_bool(
+                "AGENT4DESIGN_LLM_SSL_VERIFY",
+                True,
+            ),
+            llm_ca_bundle=Path(ca_bundle) if ca_bundle else None,
         )
 
 
@@ -95,24 +205,29 @@ def build_agent_service(settings: Optional[Agent4DesignSettings] = None):
     from agent4design.services.agent_service import Agent4DesignService
 
     resolved = settings or Agent4DesignSettings.from_env()
+
     registry = TypeRegistry(rhapsody_context)
     repository = RhapsodyRepository(
         rhapsody_context,
         registry,
         create_placeholder_type=resolved.create_placeholder_type,
     )
+
     activity_sync_service = None
     if resolved.enable_activity_import:
         if resolved.xmi_toolkit_bat is None:
             raise RuntimeError(
-                "Activity import is enabled but AGENT4DESIGN_XMI_TOOLKIT_BAT is not set."
+                "Activity import is enabled but AGENT4DESIGN_XMI_TOOLKIT_BAT "
+                "is not set."
             )
+
         activity_sync_service = ActivitySyncService(
             resolved.xmi_toolkit_bat,
             resolved.xmi_output_dir,
             resolved.xmi_log_dir,
             resolved.xmi_timeout,
         )
+
     return Agent4DesignService(
         context=rhapsody_context,
         type_registry=registry,

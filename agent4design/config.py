@@ -96,6 +96,10 @@ class Agent4DesignSettings:
     require_write_approval: bool = True
 
     mcp_transport: str = "stdio"
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 8766
+    mcp_path: str = "/mcp"
+    mcp_token: Optional[str] = None
     api_host: str = "127.0.0.1"
     api_port: int = 8765
     api_token: Optional[str] = None
@@ -141,7 +145,7 @@ class Agent4DesignSettings:
             ),
             enable_activity_import=_env_bool(
                 "AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT",
-                False,
+                bool(toolkit),
             ),
             require_write_approval=_env_bool(
                 "AGENT4DESIGN_REQUIRE_WRITE_APPROVAL",
@@ -151,6 +155,23 @@ class Agent4DesignSettings:
             mcp_transport=(
                 os.getenv("AGENT4DESIGN_MCP_TRANSPORT", "stdio").strip()
                 or "stdio"
+            ),
+            mcp_host=(
+                os.getenv(
+                    "AGENT4DESIGN_MCP_HOST",
+                    os.getenv("AGENT4DESIGN_API_HOST", "127.0.0.1"),
+                ).strip()
+                or "127.0.0.1"
+            ),
+            mcp_port=_env_int("AGENT4DESIGN_MCP_PORT", 8766),
+            mcp_path=(
+                os.getenv("AGENT4DESIGN_MCP_PATH", "/mcp").strip()
+                or "/mcp"
+            ),
+            mcp_token=(
+                os.getenv("AGENT4DESIGN_MCP_TOKEN", "").strip()
+                or os.getenv("AGENT4DESIGN_API_TOKEN", "").strip()
+                or None
             ),
             api_host=(
                 os.getenv("AGENT4DESIGN_API_HOST", "127.0.0.1").strip()
@@ -218,7 +239,8 @@ def build_agent_service(settings: Optional[Agent4DesignSettings] = None):
         if resolved.xmi_toolkit_bat is None:
             raise RuntimeError(
                 "Activity import is enabled but AGENT4DESIGN_XMI_TOOLKIT_BAT "
-                "is not set."
+                "is not set. Set it to the XMI Toolkit batch file path, then "
+                "restart the service."
             )
 
         activity_sync_service = ActivitySyncService(

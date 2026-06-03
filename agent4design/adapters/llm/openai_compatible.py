@@ -21,6 +21,7 @@ from agent4design.services.agent_service import (
 
 WRITE_TOOLS = {
     "execute_agent4design_sync",
+    "execute_code_path_modeling",
     "save_rhapsody_project",
 }
 

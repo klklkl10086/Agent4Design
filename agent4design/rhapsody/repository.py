@@ -29,6 +29,10 @@ class UnknownTypeError(LookupError):
     """Raised when a custom type is absent and placeholder creation is disabled."""
 
 
+class UnsupportedTargetError(RuntimeError):
+    """Raised when the selected Rhapsody target cannot accept a write."""
+
+
 SyncElementKind = Literal["macro", "variable", "function"]
 TypeResolutionKind = Literal[
     "void",
@@ -90,6 +94,8 @@ INTERFACE_BY_META_CLASS = {
     "Argument": "IRPArgument",
     "Type": "IRPType",
 }
+
+FUNCTION_TARGET_META_CLASSES = ("Class", "Block")
 
 
 def _cast_to_specific_interface(element: Any, meta_class: str) -> Any:
@@ -198,9 +204,18 @@ def _get_or_create_argument(operation: Any, argument: FunctionArgument) -> Any:
 
 def get_sync_meta_class(target: Any, kind: SyncElementKind) -> str:
     """Select the Rhapsody metaclass used for one semantic C element."""
-    is_classifier = getattr(target, "metaClass", "") in ("Class", "Block")
+    target_meta_class = getattr(target, "metaClass", "")
     if kind == "function":
-        return "Operation" if is_classifier else "Function"
+        if target_meta_class not in FUNCTION_TARGET_META_CLASSES:
+            raise UnsupportedTargetError(
+                "Function synchronization requires the selected Rhapsody target "
+                "to be a Class or Block. The current target metaClass is "
+                f"'{target_meta_class or 'Unknown'}'. Select a Class in Rhapsody, "
+                "then run select_rhapsody_target or initialize_rhapsody again."
+            )
+        return "Operation"
+
+    is_classifier = target_meta_class in ("Class", "Block")
     return "Attribute" if is_classifier else "Variable"
 
 

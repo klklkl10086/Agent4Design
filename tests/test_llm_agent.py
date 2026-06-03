@@ -64,6 +64,18 @@ class FakeService:
                     "required": ["request", "approved"],
                 },
             ),
+            AgentToolDefinition(
+                name="execute_code_path_modeling",
+                description="Extract code and write approved changes.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "request": {"type": "object"},
+                        "approved": {"type": "boolean"},
+                    },
+                    "required": ["request", "approved"],
+                },
+            ),
         ]
 
     def call(self, name, arguments):
@@ -149,9 +161,10 @@ class OpenAICompatibleAgentTests(unittest.TestCase):
             item["function"]["name"]: item["function"]
             for item in agent.tool_definitions()
         }
-        schema = tools["execute_agent4design_sync"]["parameters"]
-        self.assertNotIn("approved", schema["properties"])
-        self.assertNotIn("approved", schema["required"])
+        for name in ("execute_agent4design_sync", "execute_code_path_modeling"):
+            schema = tools[name]["parameters"]
+            self.assertNotIn("approved", schema["properties"])
+            self.assertNotIn("approved", schema["required"])
 
 
 if __name__ == "__main__":

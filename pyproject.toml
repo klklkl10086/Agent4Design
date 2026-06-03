@@ -9,6 +9,7 @@ description = "Rhapsody COM and XMI synchronization services with local API adap
 requires-python = ">=3.10"
 dependencies = [
   "pydantic>=2,<3",
+  "python-dotenv>=1,<2",
 ]
 
 [project.optional-dependencies]

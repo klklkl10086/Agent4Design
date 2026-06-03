@@ -14,6 +14,7 @@ class SyncWorkflowState(TypedDict, total=False):
     type_registry: Dict[str, int]
     plan: Dict[str, Any]
     write_approved: bool
+    execution: Dict[str, Any]
     model_sync: Dict[str, Any]
     activities: List[Dict[str, Any]]
     verification: Dict[str, Any]

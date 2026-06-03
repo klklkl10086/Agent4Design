@@ -49,9 +49,7 @@ def build_sync_graph(
     graph.add_node("refresh_types", nodes.refresh_types)
     graph.add_node("plan_sync", nodes.plan_sync)
     graph.add_node("request_write_approval", nodes.request_write_approval)
-    graph.add_node("sync_model", nodes.sync_model)
-    graph.add_node("sync_activities", nodes.sync_activities)
-    graph.add_node("verify", nodes.verify)
+    graph.add_node("execute_sync", nodes.execute_sync)
     graph.add_node("request_save_approval", nodes.request_save_approval)
     graph.add_node("save_project", nodes.save_project)
     graph.add_node("summarize", nodes.summarize)
@@ -71,18 +69,10 @@ def build_sync_graph(
     )
     graph.add_conditional_edges(
         "request_write_approval",
-        lambda state: "summarize" if state.get("errors") else "sync_model",
+        lambda state: "summarize" if state.get("errors") else "execute_sync",
     )
     graph.add_conditional_edges(
-        "sync_model",
-        lambda state: "summarize" if state.get("errors") else "sync_activities",
-    )
-    graph.add_conditional_edges(
-        "sync_activities",
-        lambda state: "summarize" if state.get("errors") else "verify",
-    )
-    graph.add_conditional_edges(
-        "verify",
+        "execute_sync",
         lambda state: (
             "summarize"
             if state.get("errors")

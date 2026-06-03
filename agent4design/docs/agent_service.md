@@ -18,9 +18,12 @@ LLM / LangGraph / MCP adapter
 
 | Module | Responsibility |
 | --- | --- |
+| `services/code_extractor.py` | Extract conservative model specs from C source files. |
 | `services/model_sync.py` | Synchronize macros, variables, and functions through COM. |
 | `services/activity_sync.py` | Validate, generate, and import one standalone activity XMI artifact. |
-| `services/agent_service.py` | Expose JSON-schema tool definitions and dispatch validated Agent calls. |
+| `services/sync_plan.py` | Build read-only approval plans before writes. |
+| `services/verification.py` | Run read-only post-sync COM checks. |
+| `services/agent_service.py` | Expose JSON-schema tools and dispatch validated Agent calls. |
 | `rhapsody/repository.py` | Perform small COM read/write operations. |
 | `rhapsody/type_registry.py` | Index type metadata and relocate COM objects in the active session. |
 
@@ -38,13 +41,17 @@ get_rhapsody_context
 refresh_type_registry
 save_type_index
 load_type_index
-sync_rhapsody_model
-sync_rhapsody_activity
-sync_agent4design
+extract_code_path_model
+plan_code_path_modeling
+execute_code_path_modeling
+plan_agent4design_sync
+execute_agent4design_sync
+verify_rhapsody_model
 save_rhapsody_project
 ```
 
-Project saving is explicit. `sync_rhapsody_model` does not save unless its
+Project saving is explicit and requires approval. `execute_agent4design_sync`
+can save after successful synchronization and verification only when its
 validated request includes `save_project=true`.
 
 ## Adapter Rule
@@ -60,13 +67,13 @@ framework tool definition
 Do not duplicate COM calls, XMI templates, or type lookup logic inside prompts,
 tool decorators, or workflow nodes.
 
-## Required Follow-Up
+## Remaining Follow-Up
 
 Before enabling automatic activity synchronization in a production Agent:
 
 1. Export a manually created function activity diagram with XMI Toolkit.
 2. Compare the export with `xmi/generator.py`.
 3. Determine how Rhapsody represents Function-to-Activity ownership.
-4. Add `rhapsody/verifier.py` for post-sync checks.
-5. Add a LangGraph retry workflow only after local verification is stable.
-6. Add MCP as the final transport adapter.
+4. Broaden `rhapsody/verifier.py` once ownership mapping is confirmed.
+5. Replace the conservative regex C extractor with tree-sitter or clang when
+   parser coverage becomes the limiting factor.

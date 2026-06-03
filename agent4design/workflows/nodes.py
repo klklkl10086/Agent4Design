@@ -5,14 +5,13 @@ from __future__ import annotations
 from typing import Any, Callable, Dict
 
 from agent4design.services.agent_service import (
-    ActivitySyncRequest,
     Agent4DesignService,
     AgentSyncRequest,
+    ApprovalRequest,
     EmptyRequest,
+    ExecuteSyncRequest,
     InitializeRequest,
 )
-from agent4design.services.verification import VerificationRequest
-from agent4design.tools.tool import sanitize_identifier
 from agent4design.workflows.state import SyncWorkflowState
 
 
@@ -95,67 +94,32 @@ class SyncWorkflowNodes:
             }
         return {"write_approved": True}
 
-    def sync_model(self, state: SyncWorkflowState) -> Dict[str, Any]:
+    def execute_sync(self, state: SyncWorkflowState) -> Dict[str, Any]:
         try:
             request = self._request(state)
             model_request = request.model.model_copy(update={"save_project": False})
-            result = self.service.sync_model(model_request)
-            updates: Dict[str, Any] = {"model_sync": result.model_dump(mode="json")}
-            if not result.success:
-                updates.update(_append_error(state, "Semantic model synchronization failed."))
-            return updates
-        except Exception as exc:
-            return _append_error(state, str(exc))
-
-    def sync_activities(self, state: SyncWorkflowState) -> Dict[str, Any]:
-        request = self._request(state)
-        results = []
-        errors = list(state.get("errors", []))
-        for activity in request.activities:
-            try:
-                result = self.service.sync_activity(
-                    ActivitySyncRequest(
-                        function_spec=activity.function_spec,
-                        graph=activity.graph,
-                    )
-                )
-                results.append(result.model_dump(mode="json"))
-                if not result.import_result.success:
-                    errors.append(
-                        f"Activity import failed for {activity.function_spec.name}: "
-                        f"{result.import_result.stderr}"
-                    )
-            except Exception as exc:
-                errors.append(
-                    f"Activity import failed for {activity.function_spec.name}: {exc}"
-                )
-        return {
-            "activities": results,
-            "errors": errors,
-            "success": not errors,
-        }
-
-    def verify(self, state: SyncWorkflowState) -> Dict[str, Any]:
-        try:
-            request = self._request(state)
-            activities = [
-                f"activity_{sanitize_identifier(activity.function_spec.name)}"
-                for activity in request.activities
-            ]
-            report = self.service.verify(
-                VerificationRequest(
-                    macros=request.model.macros,
-                    variables=request.model.variables,
-                    functions=request.model.functions,
-                    activities=activities,
+            sync_request = request.model_copy(update={"model": model_request})
+            result = self.service.execute_sync(
+                ExecuteSyncRequest(
+                    request=sync_request,
+                    approved=state.get("write_approved", False),
+                    verify_after_sync=True,
                 )
             )
             updates: Dict[str, Any] = {
-                "verification": report.model_dump(mode="json"),
-                "success": report.success and not state.get("errors", []),
+                "execution": result.model_dump(mode="json"),
+                "model_sync": result.sync.model.model_dump(mode="json"),
+                "activities": [
+                    item.model_dump(mode="json")
+                    for item in result.sync.activities
+                ],
+                "saved": result.saved,
+                "success": result.success and not state.get("errors", []),
             }
-            if not report.success:
-                updates.update(_append_error(state, "Post-sync verification failed."))
+            if result.verification is not None:
+                updates["verification"] = result.verification.model_dump(mode="json")
+            if not result.success:
+                updates.update(_append_error(state, "Agent4Design synchronization failed."))
             return updates
         except Exception as exc:
             return _append_error(state, str(exc))
@@ -181,7 +145,7 @@ class SyncWorkflowNodes:
 
     def save_project(self, state: SyncWorkflowState) -> Dict[str, Any]:
         try:
-            self.service.save_project(EmptyRequest())
+            self.service.save_project_approved(ApprovalRequest(approved=True))
             return {"saved": True}
         except Exception as exc:
             return _append_error(state, str(exc))

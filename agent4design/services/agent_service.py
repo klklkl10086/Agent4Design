@@ -13,6 +13,12 @@ from agent4design.rhapsody.repository import RhapsodyRepository
 from agent4design.rhapsody.type_registry import TypeRegistry
 from agent4design.rhapsody.verifier import RhapsodyVerifier
 from agent4design.services.activity_sync import ActivitySyncResult, ActivitySyncService
+from agent4design.services.code_extractor import (
+    CodePathExtractionRequest,
+    CodePathExtractionResult,
+    ExtractedActivitySpec,
+    extract_code_path_model,
+)
 from agent4design.services.model_sync import (
     ModelSyncRequest,
     ModelSyncResult,
@@ -116,6 +122,38 @@ class ExecuteSyncResult(StrictModel):
     verification: Optional[VerificationReport] = None
     saved: bool = False
     save_error: str = ""
+
+
+class CodePathModelingRequest(CodePathExtractionRequest):
+    """Code path plus synchronization options for end-to-end modeling."""
+
+    continue_on_error: bool = True
+    save_project: bool = False
+
+
+class CodePathPlanResult(StrictModel):
+    """Read-only extraction and synchronization plan for a code path."""
+
+    success: bool
+    extraction: CodePathExtractionResult
+    plan: Optional[AgentSyncPlanResult] = None
+
+
+class ExecuteCodePathModelingRequest(StrictModel):
+    """Approved end-to-end modeling request from a C source path."""
+
+    request: CodePathModelingRequest
+    approved: bool = False
+    verify_after_sync: bool = True
+
+
+class ExecuteCodePathModelingResult(StrictModel):
+    """Result of extracting code specs and executing approved modeling."""
+
+    success: bool
+    extraction: CodePathExtractionResult
+    execution: Optional[ExecuteSyncResult] = None
+    error: str = ""
 
 
 class AgentToolDefinition(StrictModel):
@@ -233,8 +271,12 @@ class Agent4DesignService:
         """Generate and import one standalone activity XMI artifact."""
         if self.activity_sync_service is None:
             raise RuntimeError(
-                "Activity sync is not configured. Construct the service with "
-                "Agent4DesignService.with_xmi_toolkit(...)."
+                "Activity sync is not configured. This is a service startup "
+                "configuration issue and retrying the same request will not fix it. "
+                "Set AGENT4DESIGN_XMI_TOOLKIT_BAT to the XMI Toolkit batch file "
+                "path and restart the service. You can also set "
+                "AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true explicitly, or construct "
+                "the service with Agent4DesignService.with_xmi_toolkit(...)."
             )
         return self.activity_sync_service.sync(
             request.function_spec,
@@ -271,6 +313,94 @@ class Agent4DesignService:
             model=model_result,
             activities=activity_results,
         )
+
+    @staticmethod
+    def _activity_request(activity: ExtractedActivitySpec) -> ActivitySyncRequest:
+        return ActivitySyncRequest(
+            function_spec=activity.function_spec,
+            graph=activity.graph,
+        )
+
+    def _sync_request_from_code_path(
+        self,
+        extraction: CodePathExtractionResult,
+        request: CodePathModelingRequest,
+    ) -> AgentSyncRequest:
+        return AgentSyncRequest(
+            model=ModelSyncRequest(
+                macros=extraction.macros,
+                variables=extraction.variables,
+                functions=extraction.functions,
+                continue_on_error=request.continue_on_error,
+                save_project=request.save_project,
+            ),
+            activities=[
+                self._activity_request(activity)
+                for activity in extraction.activities
+            ],
+        )
+
+    def extract_code_path_model(
+        self,
+        request: CodePathExtractionRequest,
+    ) -> CodePathExtractionResult:
+        """Extract model specs from a C source file or directory."""
+        return extract_code_path_model(request)
+
+    def plan_code_path_modeling(
+        self,
+        request: CodePathModelingRequest,
+    ) -> CodePathPlanResult:
+        """Extract code and build a read-only Rhapsody synchronization plan."""
+        extraction = self.extract_code_path_model(request)
+        if not extraction.success:
+            return CodePathPlanResult(success=False, extraction=extraction)
+
+        plan = self.plan_sync(
+            self._sync_request_from_code_path(extraction, request)
+        )
+        return CodePathPlanResult(
+            success=plan.success,
+            extraction=extraction,
+            plan=plan,
+        )
+
+    def execute_code_path_modeling(
+        self,
+        request: ExecuteCodePathModelingRequest,
+    ) -> ExecuteCodePathModelingResult:
+        """Extract code, execute approved modeling, and return verification."""
+        extraction = self.extract_code_path_model(request.request)
+        if not extraction.success:
+            return ExecuteCodePathModelingResult(
+                success=False,
+                extraction=extraction,
+                error="Code extraction failed.",
+            )
+
+        sync_request = self._sync_request_from_code_path(
+            extraction,
+            request.request,
+        )
+        try:
+            execution = self.execute_sync(
+                ExecuteSyncRequest(
+                    request=sync_request,
+                    approved=request.approved,
+                    verify_after_sync=request.verify_after_sync,
+                )
+            )
+            return ExecuteCodePathModelingResult(
+                success=execution.success,
+                extraction=extraction,
+                execution=execution,
+            )
+        except Exception as exc:
+            return ExecuteCodePathModelingResult(
+                success=False,
+                extraction=extraction,
+                error=str(exc),
+            )
 
     def plan_sync(self, request: AgentSyncRequest) -> AgentSyncPlanResult:
         """Build a read-only approval plan for semantic and activity writes."""
@@ -382,6 +512,9 @@ class Agent4DesignService:
             ("refresh_type_registry", "Scan Type and Class metadata from the active project.", EmptyRequest),
             ("save_type_index", "Save the serializable type metadata index.", TypeIndexPathRequest),
             ("load_type_index", "Load type metadata for later COM relocation.", TypeIndexPathRequest),
+            ("extract_code_path_model", "Extract model specs from a C source file or directory.", CodePathExtractionRequest),
+            ("plan_code_path_modeling", "Extract code and build a read-only modeling plan.", CodePathModelingRequest),
+            ("execute_code_path_modeling", "Extract code, execute approved Rhapsody modeling, and verify it.", ExecuteCodePathModelingRequest),
             ("plan_agent4design_sync", "Build a read-only synchronization plan for approval.", AgentSyncRequest),
             ("execute_agent4design_sync", "Execute an explicitly approved synchronization and verify the result.", ExecuteSyncRequest),
             ("verify_rhapsody_model", "Run read-only verification against the active Rhapsody project.", VerificationRequest),
@@ -405,6 +538,9 @@ class Agent4DesignService:
             "refresh_type_registry": (EmptyRequest, self.refresh_type_registry),
             "save_type_index": (TypeIndexPathRequest, self.save_type_index),
             "load_type_index": (TypeIndexPathRequest, self.load_type_index),
+            "extract_code_path_model": (CodePathExtractionRequest, self.extract_code_path_model),
+            "plan_code_path_modeling": (CodePathModelingRequest, self.plan_code_path_modeling),
+            "execute_code_path_modeling": (ExecuteCodePathModelingRequest, self.execute_code_path_modeling),
             "plan_agent4design_sync": (AgentSyncRequest, self.plan_sync),
             "execute_agent4design_sync": (ExecuteSyncRequest, self.execute_sync),
             "verify_rhapsody_model": (VerificationRequest, self.verify),

@@ -16,24 +16,50 @@ The adapter uses Chat Completions tool calls for broad provider compatibility.
 The rest of the project does not depend on this protocol and can gain another
 model adapter later.
 
+When the Agent calls `extract_code_path_model`, the service first segments C
+source with tree-sitter. The LLM adapter then reuses the same
+OpenAI-compatible client as an internal `CodeSegmentModelExtractor`: each
+syntax segment is sent to the model with its original source, line range, byte
+offsets, and local context, and the response must validate as strict JSON.
+
 ## Configuration
 
-Required:
+Edit `.env`; Agent4Design intentionally ignores OS-level environment variables
+for runtime settings.
+
+Required `.env` setting:
 
 ```text
-AGENT4DESIGN_LLM_MODEL
 AGENT4DESIGN_LLM_API_KEY or OPENAI_API_KEY
 ```
 
-Optional:
+Optional `.env` settings:
 
 ```text
-AGENT4DESIGN_LLM_BASE_URL
-AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS=8
+AGENT4DESIGN_LLM_MODEL=VIO:Claude 4.6 Sonnet
+AGENT4DESIGN_LLM_BASE_URL=https://vio.automotive-wan.com:446
+AGENT4DESIGN_LLM_TEMPERATURE=0.1
+AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS=30
+AGENT4DESIGN_LLM_MAX_RETRIES=3
+AGENT4DESIGN_LLM_HEADERS={"useLegacyCompletionsEndpoint":"false","X-Tenant-ID":"default_tenant"}
 ```
 
-`AGENT4DESIGN_LLM_BASE_URL` can point to an OpenAI-compatible endpoint. Omit it
-for the default OpenAI API URL.
+Code path extraction also needs the parser extra:
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+The defaults mirror the legacy VIO Agent setup. Override model/base URL when
+using a different OpenAI-compatible provider.
+
+Legacy names are still accepted when they are written in `.env`:
+
+```text
+API_TOKEN
+BASE_URL
+VIO_HEADERS
+```
 
 ## Run
 

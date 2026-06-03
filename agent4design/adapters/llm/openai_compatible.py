@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+import time
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import httpx
@@ -12,6 +13,11 @@ from pydantic import Field
 
 from agent4design.config import Agent4DesignSettings, build_agent_service
 from agent4design.domain.models import StrictModel
+from agent4design.services.code_extractor import (
+    CodeSegmentExtraction,
+    CodeSyntaxSegment,
+    parse_segment_extraction_json,
+)
 from agent4design.services.agent_service import (
     Agent4DesignService,
     AgentToolDefinition,
@@ -40,7 +46,38 @@ DEFAULT_VIO_HEADERS = {
     "X-Tenant-ID": "default_tenant",
 }
 
+CODE_EXTRACTION_SYSTEM_PROMPT = """\
+You extract IBM Rhapsody modeling specs from parser-identified C/C++ source
+segments. The segment boundary was produced by tree-sitter; do not invent code
+outside the provided source and context. Return JSON only. Match the provided
+schema. Use empty arrays when the segment does not define a model element.
+"""
+
 ApprovalHandler = Callable[[str, Dict[str, Any]], bool]
+
+
+def _create_chat_completion_with_retries(
+    completions: Any,
+    *,
+    max_retries: int,
+    **kwargs: Any,
+) -> Any:
+    """Call chat completions with legacy-style bounded retry behavior."""
+    attempts = max(1, max_retries)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return completions.create(**kwargs)
+        except TypeError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            time.sleep(min(60.0, 2.0 * (2 ** (attempt - 1))))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Chat completion failed without an exception.")
 
 
 class ToolExecutionRecord(StrictModel):
@@ -58,6 +95,70 @@ class AgentRunResult(StrictModel):
     response: str
     tool_calls: List[ToolExecutionRecord] = Field(default_factory=list)
     messages: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class OpenAICodeSegmentExtractor:
+    """Ask an OpenAI-compatible model to extract specs from one syntax segment."""
+
+    def __init__(
+        self,
+        client: Any,
+        *,
+        model: str,
+        temperature: float = 0.1,
+        max_retries: int = 3,
+        system_prompt: str = CODE_EXTRACTION_SYSTEM_PROMPT,
+    ) -> None:
+        self.client = client
+        self.model = model
+        self.temperature = temperature
+        self.max_retries = max_retries
+        self.system_prompt = system_prompt
+
+    def extract(
+        self,
+        segment: CodeSyntaxSegment,
+        *,
+        include_activities: bool,
+    ) -> CodeSegmentExtraction:
+        schema = CodeSegmentExtraction.model_json_schema()
+        payload = segment.model_dump(mode="json")
+        payload["include_activities"] = include_activities
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "schema": schema,
+                        "segment": payload,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "response_format": {"type": "json_object"},
+        }
+        try:
+            completion = _create_chat_completion_with_retries(
+                self.client.chat.completions,
+                max_retries=self.max_retries,
+                **kwargs,
+            )
+        except TypeError:
+            kwargs.pop("response_format", None)
+            completion = _create_chat_completion_with_retries(
+                self.client.chat.completions,
+                max_retries=self.max_retries,
+                **kwargs,
+            )
+        content = completion.choices[0].message.content or "{}"
+        return parse_segment_extraction_json(content, segment_id=segment.id)
 
 
 def _jsonable(value: Any) -> Any:
@@ -172,7 +273,9 @@ class OpenAICompatibleAgent:
         client: Any,
         *,
         model: str,
-        max_tool_rounds: int = 8,
+        max_tool_rounds: int = 30,
+        temperature: float = 0.1,
+        max_retries: int = 3,
         approval_handler: Optional[ApprovalHandler] = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
     ) -> None:
@@ -186,6 +289,8 @@ class OpenAICompatibleAgent:
         self.client = client
         self.model = model
         self.max_tool_rounds = max_tool_rounds
+        self.temperature = temperature
+        self.max_retries = max_retries
         self.approval_handler = approval_handler
         self.system_prompt = system_prompt
 
@@ -248,11 +353,14 @@ class OpenAICompatibleAgent:
         tools = self.tool_definitions()
 
         for _ in range(self.max_tool_rounds):
-            completion = self.client.chat.completions.create(
+            completion = _create_chat_completion_with_retries(
+                self.client.chat.completions,
+                max_retries=self.max_retries,
                 model=self.model,
                 messages=list(conversation),
                 tools=tools,
                 tool_choice="auto",
+                temperature=self.temperature,
             )
 
             message = completion.choices[0].message
@@ -322,8 +430,8 @@ def create_openai_compatible_agent(
 
     if resolved.llm_model is None:
         raise RuntimeError(
-            "Set AGENT4DESIGN_LLM_MODEL or OPENAI_MODEL before starting "
-            "the Agent."
+            "Edit .env and set AGENT4DESIGN_LLM_MODEL or OPENAI_MODEL before "
+            "starting the Agent."
         )
 
     if client is None:
@@ -337,14 +445,14 @@ def create_openai_compatible_agent(
 
         if not resolved.llm_api_key:
             raise RuntimeError(
-                "Set AGENT4DESIGN_LLM_API_KEY, OPENAI_API_KEY, or API_TOKEN "
-                "before starting the Agent."
+                "Edit .env and set AGENT4DESIGN_LLM_API_KEY, OPENAI_API_KEY, "
+                "or API_TOKEN before starting the Agent."
             )
 
         if not resolved.llm_base_url:
             raise RuntimeError(
-                "Set AGENT4DESIGN_LLM_BASE_URL or OPENAI_BASE_URL before "
-                "starting the Agent."
+                "Edit .env and set AGENT4DESIGN_LLM_BASE_URL or OPENAI_BASE_URL "
+                "before starting the Agent."
             )
 
         custom_http_client = _build_http_client(resolved)
@@ -352,15 +460,29 @@ def create_openai_compatible_agent(
         client = openai.OpenAI(
             api_key=resolved.llm_api_key,
             base_url=resolved.llm_base_url,
-            default_headers=resolved.llm_header or DEFAULT_VIO_HEADERS,
+            default_headers={**(resolved.llm_header or DEFAULT_VIO_HEADERS)},
             http_client=custom_http_client,
-            max_retries=3,
+            max_retries=resolved.llm_max_retries,
+        )
+
+    service_instance = service
+    if service_instance is None:
+        service_instance = build_agent_service(
+            resolved,
+            code_model_extractor=OpenAICodeSegmentExtractor(
+                client,
+                model=resolved.llm_model,
+                temperature=resolved.llm_temperature,
+                max_retries=resolved.llm_max_retries,
+            ),
         )
 
     return OpenAICompatibleAgent(
-        service or build_agent_service(resolved),
+        service_instance,
         client,
         model=resolved.llm_model,
         max_tool_rounds=resolved.llm_max_tool_rounds,
+        temperature=resolved.llm_temperature,
+        max_retries=resolved.llm_max_retries,
         approval_handler=approval_handler,
     )

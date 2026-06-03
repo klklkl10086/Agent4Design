@@ -14,6 +14,7 @@ from agent4design.rhapsody.type_registry import TypeRegistry
 from agent4design.rhapsody.verifier import RhapsodyVerifier
 from agent4design.services.activity_sync import ActivitySyncResult, ActivitySyncService
 from agent4design.services.code_extractor import (
+    CodeSegmentModelExtractor,
     CodePathExtractionRequest,
     CodePathExtractionResult,
     ExtractedActivitySpec,
@@ -183,6 +184,7 @@ class Agent4DesignService:
         repository: Optional[RhapsodyRepository] = None,
         model_sync_service: Optional[ModelSyncService] = None,
         activity_sync_service: Optional[ActivitySyncService] = None,
+        code_model_extractor: Optional[CodeSegmentModelExtractor] = None,
         sync_plan_service: Optional[SyncPlanService] = None,
         verification_service: Optional[VerificationService] = None,
         require_write_approval: bool = True,
@@ -200,6 +202,7 @@ class Agent4DesignService:
             context,
         )
         self.activity_sync_service = activity_sync_service
+        self.code_model_extractor = code_model_extractor
         self.sync_plan_service = sync_plan_service or SyncPlanService(self.repository)
         self.verification_service = verification_service or VerificationService(
             RhapsodyVerifier(context)
@@ -345,7 +348,10 @@ class Agent4DesignService:
         request: CodePathExtractionRequest,
     ) -> CodePathExtractionResult:
         """Extract model specs from a C source file or directory."""
-        return extract_code_path_model(request)
+        return extract_code_path_model(
+            request,
+            model_extractor=self.code_model_extractor,
+        )
 
     def plan_code_path_modeling(
         self,
@@ -512,7 +518,7 @@ class Agent4DesignService:
             ("refresh_type_registry", "Scan Type and Class metadata from the active project.", EmptyRequest),
             ("save_type_index", "Save the serializable type metadata index.", TypeIndexPathRequest),
             ("load_type_index", "Load type metadata for later COM relocation.", TypeIndexPathRequest),
-            ("extract_code_path_model", "Extract model specs from a C source file or directory.", CodePathExtractionRequest),
+            ("extract_code_path_model", "Segment C code with a parser and extract model specs through the configured LLM extractor.", CodePathExtractionRequest),
             ("plan_code_path_modeling", "Extract code and build a read-only modeling plan.", CodePathModelingRequest),
             ("execute_code_path_modeling", "Extract code, execute approved Rhapsody modeling, and verify it.", ExecuteCodePathModelingRequest),
             ("plan_agent4design_sync", "Build a read-only synchronization plan for approval.", AgentSyncRequest),

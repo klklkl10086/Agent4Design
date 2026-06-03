@@ -18,7 +18,7 @@ LLM / LangGraph / MCP adapter
 
 | Module | Responsibility |
 | --- | --- |
-| `services/code_extractor.py` | Extract conservative model specs from C source files. |
+| `services/code_extractor.py` | Segment C code with tree-sitter and merge LLM-extracted model specs. |
 | `services/model_sync.py` | Synchronize macros, variables, and functions through COM. |
 | `services/activity_sync.py` | Validate, generate, and import one standalone activity XMI artifact. |
 | `services/sync_plan.py` | Build read-only approval plans before writes. |
@@ -54,6 +54,27 @@ Project saving is explicit and requires approval. `execute_agent4design_sync`
 can save after successful synchronization and verification only when its
 validated request includes `save_project=true`.
 
+## Code Path Extraction
+
+Code extraction is intentionally split into two steps:
+
+```text
+source path
+  -> parser-backed syntax segments
+  -> CodeSegmentModelExtractor
+  -> validated Pydantic model specs
+```
+
+The default segmenter uses tree-sitter's C grammar. It preserves each segment's
+original source, line range, byte offsets, symbol hint, and earlier local
+context snippets. No COM writes happen in this layer.
+
+`CodeSegmentModelExtractor` is a protocol. The OpenAI-compatible LLM adapter
+injects an implementation that sends one syntax segment at a time to the model
+and requires a strict `CodeSegmentExtraction` JSON response. HTTP and MCP
+servers can still expose parser segments without an internal LLM by calling
+`extract_code_path_model` with `require_model_extraction=false`.
+
 ## Adapter Rule
 
 LangChain, LangGraph, and MCP integrations should be thin adapters:
@@ -75,5 +96,5 @@ Before enabling automatic activity synchronization in a production Agent:
 2. Compare the export with `xmi/generator.py`.
 3. Determine how Rhapsody represents Function-to-Activity ownership.
 4. Broaden `rhapsody/verifier.py` once ownership mapping is confirmed.
-5. Replace the conservative regex C extractor with tree-sitter or clang when
-   parser coverage becomes the limiting factor.
+5. Add a clang-backed extractor option when include resolution, macro expansion,
+   or type-accurate analysis becomes the limiting factor.

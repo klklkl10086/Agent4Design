@@ -9,7 +9,7 @@ python -m agent4design.adapters.http
 
 ## Configuration
 
-| Environment variable | Default | Purpose |
+| `.env` setting | Default | Purpose |
 | --- | --- | --- |
 | `AGENT4DESIGN_API_HOST` | `127.0.0.1` | HTTP bind host. |
 | `AGENT4DESIGN_API_PORT` | `8765` | HTTP bind port. |
@@ -50,6 +50,25 @@ X-Agent4Design-Token: <token>
 6. Review the dry-run report.
 7. Call `execute_agent4design_sync` with `approved=true`.
 8. Call `save_rhapsody_project` with `approved=true` if needed.
+
+## Code Path Segmentation
+
+`extract_code_path_model` uses tree-sitter for C syntax segmentation. Install
+the parser extra:
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+The plain HTTP API does not create an internal LLM extractor. To receive parser
+segments for an external Agent to process, call the tool with:
+
+```json
+{
+  "path": "src",
+  "require_model_extraction": false
+}
+```
 
 ## Plan Example
 

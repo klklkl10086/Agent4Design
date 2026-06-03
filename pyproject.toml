@@ -16,6 +16,10 @@ dependencies = [
 rhapsody = [
   "pywin32>=306; platform_system == 'Windows'",
 ]
+parser = [
+  "tree-sitter>=0.24,<0.26",
+  "tree-sitter-c>=0.23,<0.25",
+]
 mcp = [
   "mcp[cli]>=1,<2",
 ]

@@ -1,8 +1,17 @@
 # Agent4Design
 
-Agent4Design 是一个面向 IBM Rhapsody 的本地建模助手。它把 C 代码和结构化模型数据转换为可验证的 Rhapsody 写入操作，并通过 COM API、XMI Toolkit、HTTP、MCP 和 LLM 适配器提供统一入口。
+Agent4Design is a local IBM Rhapsody modeling assistant. It turns C source code
+and structured model specifications into approval-gated, verifiable Rhapsody
+updates through COM, XMI Toolkit, HTTP, MCP, LangGraph, and OpenAI-compatible
+LLM adapters.
 
-当前设计原则：
+---
+
+## 中文文档
+
+### 项目定位
+
+Agent4Design 的目标不是让 LLM 直接操作 Rhapsody COM，而是把建模流程拆成可验证的本地服务：
 
 ```text
 C 代码 / 用户请求
@@ -13,60 +22,172 @@ C 代码 / 用户请求
   -> COM 验证报告
 ```
 
-LLM、MCP、HTTP 和 LangGraph 不直接调用 COM。它们只调用 `Agent4DesignService`。
+所有外部入口都走同一个稳定边界：
 
-## 安装
+```text
+LLM / MCP / HTTP / LangGraph
+  -> Agent4DesignService
+  -> services
+  -> rhapsody / xmi
+```
 
-在能访问当前 Rhapsody 桌面会话的 Windows Python 环境中安装：
+这意味着：
+
+- LLM、MCP、HTTP 和 LangGraph 不直接调用 COM。
+- 写入 Rhapsody 前默认需要显式批准。
+- 项目保存必须显式执行。
+- COM 操作在专用 STA 线程中串行执行。
+- 代码路径抽取不使用正则表达式猜 C 语法，而是用 tree-sitter 分段，再由 LLM 输出严格 JSON。
+
+### 环境要求
+
+- Windows。
+- Python 3.10 或更高版本。
+- IBM Rhapsody 已安装，并且 Python 进程能访问当前桌面会话中的 Rhapsody。
+- 如需 COM 写入：安装 `pywin32`。
+- 如需代码路径抽取：安装 `tree-sitter` parser extra。
+- 如需 LLM Agent：准备 OpenAI-compatible API key。
+- 如需活动图 XMI 导入：准备 IBM Rhapsody XMI Toolkit batch 文件路径。
+
+### 安装
+
+基础 Rhapsody COM 能力：
 
 ```powershell
 python -m pip install -e ".[rhapsody]"
 ```
 
-安装全部可选适配器：
+开发或完整功能安装：
 
 ```powershell
-python -m pip install -e ".[rhapsody,llm,mcp,graph,dev]"
+python -m pip install -e ".[rhapsody,parser,llm,mcp,graph,dev]"
 ```
 
-## 基本配置
+可选 extras：
 
-可以在项目根目录 `.env` 中配置：
+```text
+rhapsody  pywin32 / Rhapsody COM
+parser    tree-sitter C parser
+llm       OpenAI-compatible Agent
+mcp       MCP Server
+graph     LangGraph workflow
+dev       pytest
+```
+
+安装后也可以使用脚本入口：
 
 ```powershell
+agent4design-api
+agent4design-agent
+agent4design-mcp
+```
+
+### 配置方式
+
+Agent4Design 只通过 `.env` 文件读取运行配置。系统环境变量会被忽略，避免 PowerShell、Windows 用户环境或旧服务残留变量影响本次运行。
+
+配置查找顺序：
+
+```text
+当前工作目录 .env
+项目根目录 .env
+agent4design/.env
+```
+
+前面的 `.env` 优先级更高。推荐在项目根目录创建或编辑 `.env`。
+
+最小配置：
+
+```dotenv
 AGENT4DESIGN_REQUIRE_WRITE_APPROVAL=true
 AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE=false
 ```
 
-默认行为：
+LLM / VIO 配置：
 
-- 写入 Rhapsody 前需要显式批准。
-- 未知自定义类型默认拒绝创建占位 `Type`。
-- 项目保存必须显式调用保存工具。
-- COM 操作在专用 STA 线程中串行执行。
+```dotenv
+AGENT4DESIGN_LLM_API_KEY=your-api-key
+AGENT4DESIGN_LLM_MODEL=VIO:Claude 4.6 Sonnet
+AGENT4DESIGN_LLM_BASE_URL=https://vio.automotive-wan.com:446
+AGENT4DESIGN_LLM_TEMPERATURE=0.1
+AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS=30
+AGENT4DESIGN_LLM_MAX_RETRIES=3
+AGENT4DESIGN_LLM_HEADERS={"useLegacyCompletionsEndpoint":"false","X-Tenant-ID":"default_tenant"}
+```
 
-## Rhapsody 使用流程
+也兼容 legacy 变量名，但仍然必须写在 `.env` 文件中：
 
-1. 打开 Rhapsody 并加载目标项目。
-2. 在 Rhapsody 浏览器中选择一个可写目标。
-3. 如果要创建函数，建议选择 `Class` 或 `Block`，不要选择 `Module`。
-4. 调用初始化工具：
+```dotenv
+API_TOKEN=your-api-key
+BASE_URL=https://vio.automotive-wan.com:446
+VIO_HEADERS={"useLegacyCompletionsEndpoint":"false","X-Tenant-ID":"default_tenant"}
+```
+
+HTTP / MCP token：
+
+```dotenv
+AGENT4DESIGN_API_TOKEN=your-api-token
+AGENT4DESIGN_MCP_TOKEN=your-mcp-token
+```
+
+活动图 XMI 导入：
+
+```dotenv
+AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat
+AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
+AGENT4DESIGN_XMI_OUTPUT_DIR=xmi_read
+AGENT4DESIGN_XMI_LOG_DIR=xmi_import_logs
+AGENT4DESIGN_XMI_TIMEOUT=600
+```
+
+SSL / CA 配置：
+
+```dotenv
+AGENT4DESIGN_LLM_SSL_VERIFY=true
+AGENT4DESIGN_LLM_CA_BUNDLE=C:\path\to\vio_root_ca.pem
+```
+
+如果当前只是临时绕过证书问题：
+
+```dotenv
+AGENT4DESIGN_LLM_SSL_VERIFY=false
+```
+
+### Rhapsody 使用流程
+
+1. 打开 Rhapsody。
+2. 加载目标项目。
+3. 在 Rhapsody 浏览器中选择可写目标。
+4. 如果要创建函数，推荐选择 `Class` 或 `Block`。
+5. 初始化 Agent4Design 上下文：
 
 ```text
 initialize_rhapsody
 ```
 
-或刷新当前选择：
+如果 Rhapsody 中切换了选择目标，调用：
 
 ```text
 select_rhapsody_target
 ```
 
-## 函数创建目标限制
+推荐完整同步流程：
+
+```text
+initialize_rhapsody
+  -> refresh_type_registry
+  -> plan_agent4design_sync
+  -> 人工检查计划
+  -> execute_agent4design_sync(approved=true)
+  -> verify_rhapsody_model
+  -> save_rhapsody_project(approved=true)
+```
+
+### 函数创建目标限制
 
 函数同步现在只允许写入 `Class` 或 `Block`，并创建为 `Operation`。
 
-如果当前目标是 `Module`，计划阶段和执行阶段都会拒绝写入，并提示重新选择目标。这是为了避免 Rhapsody COM 抛出类似：
+如果当前目标是 `Module`，计划阶段和执行阶段会拒绝函数写入。这是为了避免 Rhapsody COM 抛出类似：
 
 ```text
 发生意外 (-2147221495)
@@ -75,121 +196,16 @@ select_rhapsody_target
 正确处理方式：
 
 ```text
-在 Rhapsody 中选择目标 Class
+在 Rhapsody 中选择目标 Class 或 Block
   -> 调用 select_rhapsody_target
-  -> 再执行 plan / execute
+  -> 重新执行 plan / execute
 ```
 
-不要依赖重试。目标元类不正确时，重试本身不会解决问题。
+不要依赖重试。目标元类不正确时，重试不会解决问题。
 
-## 活动图 XMI 导入配置
+### 常用工具
 
-活动图导入依赖 IBM Rhapsody XMI Toolkit。服务启动时必须配置 Toolkit 路径。
-
-在 `.env` 中设置：
-
-```powershell
-AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat
-```
-
-设置该路径后，服务会默认启用活动图导入。也可以显式启用：
-
-```powershell
-AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
-AGENT4DESIGN_XMI_OUTPUT_DIR=xmi_read
-AGENT4DESIGN_XMI_LOG_DIR=xmi_import_logs
-AGENT4DESIGN_XMI_TIMEOUT=600
-```
-
-如果未配置 Toolkit，活动图导入会报错：
-
-```text
-Activity sync is not configured
-```
-
-这是服务启动配置问题，不能通过重试同一个请求解决。需要配置环境变量并重启 HTTP、MCP 或 LLM Agent 服务。
-
-注意：当前活动图导入仍是实验能力。生成的 XMI 会导入为独立 Activity Package，Function 与 Activity 的归属关系需要通过手工 XMI 导出实验继续确认。
-
-## HTTP API
-
-启动本地 HTTP 服务：
-
-```powershell
-python -m agent4design.adapters.http
-```
-
-默认地址：
-
-```text
-http://127.0.0.1:8765
-```
-
-常用接口：
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8765/health
-Invoke-RestMethod http://127.0.0.1:8765/tools
-```
-
-调用工具：
-
-```powershell
-$body = @{
-  name = "initialize_rhapsody"
-  arguments = @{ select_current_target = $true }
-} | ConvertTo-Json -Depth 10
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8765/call `
-  -ContentType application/json `
-  -Body $body
-```
-
-监听非 localhost 地址时必须设置：
-
-```powershell
-AGENT4DESIGN_API_TOKEN=your-token
-```
-
-## MCP 服务
-
-启动本地 MCP Server：
-
-```powershell
-python -m agent4design.adapters.mcp
-```
-
-MCP 暴露的是 `Agent4DesignService` 的薄适配，不包含 COM 写入逻辑。写入类工具仍需要显式批准。
-
-## LLM Agent
-
-配置 OpenAI 或 OpenAI-compatible 接口：
-
-```powershell
-AGENT4DESIGN_LLM_MODEL=your-model
-AGENT4DESIGN_LLM_API_KEY=your-api-key
-AGENT4DESIGN_LLM_BASE_URL=https://provider.example/v1
-```
-
-启动只读交互：
-
-```powershell
-python -m agent4design.adapters.llm
-```
-
-允许模型请求写入时，由终端人工确认：
-
-```powershell
-python -m agent4design.adapters.llm --allow-writes
-```
-
-模型不能自己批准写入。即使模型参数中传入 `approved=true`，适配器也会移除并要求人工确认。
-
-## 常用工具
-
-主要工具包括：
+`Agent4DesignService` 暴露以下工具：
 
 ```text
 initialize_rhapsody
@@ -207,66 +223,939 @@ verify_rhapsody_model
 save_rhapsody_project
 ```
 
-推荐流程：
+工具说明：
 
 ```text
-initialize_rhapsody
-  -> refresh_type_registry
-  -> plan_agent4design_sync
-  -> 人工检查计划
-  -> execute_agent4design_sync(approved=true)
-  -> verify_rhapsody_model
-  -> save_rhapsody_project(approved=true)
+initialize_rhapsody          连接 Rhapsody，可选择当前 GUI 目标
+select_rhapsody_target      从 Rhapsody GUI 刷新当前写入目标
+get_rhapsody_context        返回当前项目和目标摘要
+refresh_type_registry       扫描项目 Type / Class 元数据
+save_type_index             保存类型索引用于诊断
+load_type_index             加载类型索引
+extract_code_path_model     对 C 路径做 parser 分段和 LLM 结构化抽取
+plan_code_path_modeling     从代码路径生成只读同步计划
+execute_code_path_modeling  经批准后执行代码路径建模
+plan_agent4design_sync      对结构化模型请求生成只读计划
+execute_agent4design_sync   经批准后执行 COM / XMI 写入和验证
+verify_rhapsody_model       只读验证模型元素
+save_rhapsody_project       经批准后保存当前项目
 ```
 
-## 故障排查
+### 代码路径抽取
 
-### 函数创建报 `-2147221495`
+`extract_code_path_model` 不使用正则表达式匹配 C 代码结构。当前流程是：
 
-原因通常是当前目标元类不适合写入函数，例如选中了 `Module`。
+```text
+指定 .c / .h 路径
+  -> tree-sitter 按语法节点分段
+  -> 每段保留原始源码、行号、byte offset 和上下文
+  -> LLM 对每段输出严格 JSON
+  -> Pydantic 校验
+  -> 合并为 Rhapsody 建模规格
+```
+
+需要安装：
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+通过 LLM CLI 使用时，LLM adapter 会把同一个 OpenAI-compatible client 注入为代码片段抽取器。
+
+通过 HTTP / MCP 直接调用时，如果没有内部 LLM 抽取器，可以只获取 parser 分段：
+
+```json
+{
+  "path": "src",
+  "recursive": true,
+  "include_headers": true,
+  "include_activities": true,
+  "require_model_extraction": false
+}
+```
+
+返回结果会包含 `segments`，每个 segment 包含：
+
+```text
+path
+language
+kind
+symbol
+start_line / end_line
+start_byte / end_byte
+source
+context
+```
+
+经 LLM 抽取后，结果会合并为：
+
+```text
+macros
+variables
+functions
+activities
+warnings
+errors
+```
+
+### HTTP API
+
+启动：
+
+```powershell
+python -m agent4design.adapters.http
+```
+
+默认地址：
+
+```text
+http://127.0.0.1:8765
+```
+
+检查服务：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health
+Invoke-RestMethod http://127.0.0.1:8765/tools
+```
+
+调用通用工具接口：
+
+```powershell
+$body = @{
+  name = "initialize_rhapsody"
+  arguments = @{ select_current_target = $true }
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8765/call `
+  -ContentType application/json `
+  -Body $body
+```
+
+调用命名工具接口：
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8765/tools/get_rhapsody_context `
+  -ContentType application/json `
+  -Body "{}"
+```
+
+如果 HTTP 监听非 localhost 地址，必须在 `.env` 中配置：
+
+```dotenv
+AGENT4DESIGN_API_TOKEN=your-token
+```
+
+### MCP 服务
+
+本地 stdio MCP：
+
+```powershell
+python -m agent4design.adapters.mcp --transport stdio
+```
+
+远程 streamable HTTP MCP：
+
+```powershell
+python -m agent4design.adapters.mcp `
+  --transport streamable-http `
+  --host 0.0.0.0 `
+  --port 8766 `
+  --path /mcp `
+  --token your-secret-token
+```
+
+远程 MCP 仍然操作运行该服务的 Windows 机器上的本地 Rhapsody 会话。不要直接暴露到公网。
+
+### LLM Agent
+
+启动只读交互：
+
+```powershell
+python -m agent4design.adapters.llm
+```
+
+单轮输入：
+
+```powershell
+python -m agent4design.adapters.llm --message "Inspect the selected Rhapsody target."
+```
+
+允许模型请求写入，但由终端人工确认：
+
+```powershell
+python -m agent4design.adapters.llm --allow-writes
+```
+
+安全边界：
+
+- 模型看不到 `approved` schema。
+- 模型即使生成 `approved=true` 也会被本地 adapter 覆盖。
+- 没有人工确认时，写入工具会被拒绝。
+- 写入成功与否以工具返回结果为准。
+
+### LangGraph 工作流
+
+LangGraph 是可选能力，用于可恢复的计划、批准、执行、验证流程。
+
+安装：
+
+```powershell
+python -m pip install -e ".[graph]"
+```
+
+核心入口：
+
+```text
+agent4design.workflows.sync_graph.build_sync_graph
+agent4design.workflows.sync_graph.create_sqlite_checkpointer
+```
+
+当前工作流仍然调用 `Agent4DesignService`，不直接访问 COM。
+
+### 活动图 XMI 导入
+
+活动图导入依赖 IBM Rhapsody XMI Toolkit。没有配置 Toolkit 时，活动图导入会失败：
+
+```text
+Activity sync is not configured
+```
+
+这是启动配置问题，不是可重试问题。配置 `.env` 后需要重启 HTTP、MCP 或 LLM Agent 服务。
+
+当前活动图导入仍是实验能力：生成的 XMI 会作为独立 Activity Package 导入，Function 与 Activity 的 ownership 关系仍需通过手工 XMI 导出继续验证。
+
+### 项目结构
+
+```text
+Agent4Design/
+  README.md
+  pyproject.toml
+  agent4design/
+    adapters/
+      http/               本地 JSON-over-HTTP API
+      llm/                OpenAI-compatible tool-calling Agent
+      mcp/                MCP Server adapter
+    docs/                 设计说明、API 使用说明、历史资料
+    domain/
+      models.py           Pydantic 数据模型
+      validators.py       Activity graph 等校验逻辑
+    rhapsody/
+      com_runtime.py      COM STA 线程调度
+      context.py          Rhapsody 应用、项目、目标上下文
+      repository.py       COM 读写仓库
+      type_registry.py    Type / Class 元数据索引
+      verifier.py         只读验证器
+    services/
+      agent_service.py    统一 Agent-facing 门面
+      code_extractor.py   tree-sitter 分段和 LLM 抽取协议
+      model_sync.py       宏、变量、函数同步服务
+      sync_plan.py        写入前只读计划
+      verification.py     验证服务封装
+      activity_sync.py    XMI 生成和导入服务
+    tools/
+      tool.py             通用工具函数
+    workflows/
+      sync_graph.py       LangGraph 工作流构建
+      nodes.py            工作流节点
+      state.py            工作流状态
+    xmi/
+      generator.py        Activity XMI 生成
+      importer.py         XMI Toolkit 调用
+  tests/                  离线测试
+  legacy/                 历史实验脚本
+```
+
+### 设计边界
+
+核心边界：
+
+```text
+外部 adapter
+  -> Agent4DesignService.call(name, arguments)
+  -> Pydantic request validation
+  -> service layer
+  -> repository / XMI toolkit
+```
+
+原则：
+
+- adapter 只做协议转换。
+- service 层负责业务编排。
+- rhapsody 层负责 COM 细节。
+- xmi 层负责 XMI 文件生成和导入。
+- LLM 只负责调用工具和抽取结构化 JSON，不直接操作 COM。
+
+### 故障排查
+
+#### `-2147221495`
+
+通常是当前目标不适合创建函数，例如选中了 `Module`。
 
 处理：
 
 ```text
 选择 Class 或 Block
 调用 select_rhapsody_target
-重新执行计划和写入
+重新执行 plan / execute
 ```
 
-### 活动图导入报 `Activity sync is not configured`
+#### `Activity sync is not configured`
 
-原因是服务启动时未配置 XMI Toolkit。
+原因是未配置 XMI Toolkit。
 
 处理：
 
-```powershell
+```dotenv
 AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat
 AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
 ```
 
 然后重启服务。
 
-### 自定义类型找不到
+#### 自定义类型找不到
 
-默认不会自动创建占位类型，避免拼写错误污染模型。
+默认不会自动创建未知自定义类型，避免拼写错误污染模型。
 
 处理：
 
 ```text
 先在 Rhapsody 项目中创建正确类型
-或显式设置 AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE=true
+或在 .env 中设置 AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE=true
 ```
 
-## 项目结构
+#### LLM API key 没生效
+
+确认配置写在 `.env` 文件里，而不是系统环境变量里。
+
+可用键：
+
+```dotenv
+AGENT4DESIGN_LLM_API_KEY=...
+```
+
+或 legacy 键：
+
+```dotenv
+API_TOKEN=...
+```
+
+#### tree-sitter 未安装
+
+错误信息通常会提示安装 parser extra。
+
+处理：
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+### 测试
+
+运行离线测试：
+
+```powershell
+python -m pytest -q
+```
+
+如果机器上有多个 Python，请使用安装了依赖的解释器：
+
+```powershell
+D:\Environment\miniconda\python.exe -m pytest -q
+```
+
+编译检查：
+
+```powershell
+python -m compileall -q agent4design tests
+```
+
+---
+
+## English Documentation
+
+### Purpose
+
+Agent4Design is a local modeling assistant for IBM Rhapsody. It converts C code
+and structured model data into verifiable Rhapsody updates through a stable
+service boundary.
+
+The intended workflow is:
 
 ```text
-agent4design/
-  adapters/      HTTP、MCP、LLM 适配层
-  domain/        Pydantic 数据模型和校验
-  rhapsody/      COM 运行时、上下文、仓库、类型索引、验证器
-  services/      计划、同步、验证、代码提取和 Agent 门面
-  tools/         小型通用工具
-  xmi/           活动图 XMI 生成和导入
+C source / user request
+  -> Pydantic structured model
+  -> read-only plan
+  -> human approval
+  -> Rhapsody COM write / XMI import
+  -> COM verification report
 ```
 
-旧脚本已移动到 `legacy/`，作为历史实验代码保留。
+Every adapter calls the same facade:
+
+```text
+LLM / MCP / HTTP / LangGraph
+  -> Agent4DesignService
+  -> services
+  -> rhapsody / xmi
+```
+
+Important defaults:
+
+- LLM, MCP, HTTP, and LangGraph do not call COM directly.
+- Rhapsody writes require explicit approval by default.
+- Saving the project is explicit.
+- COM operations run serially on a dedicated STA thread.
+- Code path extraction uses tree-sitter syntax segmentation plus strict LLM JSON extraction, not regex-based C parsing.
+
+### Requirements
+
+- Windows.
+- Python 3.10 or newer.
+- IBM Rhapsody installed and available in the current desktop session.
+- `pywin32` for COM access.
+- tree-sitter parser extra for code path extraction.
+- An OpenAI-compatible API key for the LLM Agent.
+- IBM Rhapsody XMI Toolkit if you want standalone activity import.
+
+### Installation
+
+Install the Rhapsody COM support:
+
+```powershell
+python -m pip install -e ".[rhapsody]"
+```
+
+Install all optional adapters and development tools:
+
+```powershell
+python -m pip install -e ".[rhapsody,parser,llm,mcp,graph,dev]"
+```
+
+Optional extras:
+
+```text
+rhapsody  pywin32 / Rhapsody COM
+parser    tree-sitter C parser
+llm       OpenAI-compatible Agent
+mcp       MCP Server
+graph     LangGraph workflow
+dev       pytest
+```
+
+Script entry points:
+
+```powershell
+agent4design-api
+agent4design-agent
+agent4design-mcp
+```
+
+### Configuration
+
+Agent4Design reads runtime settings only from `.env` files. OS-level
+environment variables are intentionally ignored.
+
+Lookup order:
+
+```text
+current working directory .env
+project root .env
+agent4design/.env
+```
+
+Earlier files have higher priority. The recommended place is the project root
+`.env`.
+
+Minimal configuration:
+
+```dotenv
+AGENT4DESIGN_REQUIRE_WRITE_APPROVAL=true
+AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE=false
+```
+
+LLM / VIO configuration:
+
+```dotenv
+AGENT4DESIGN_LLM_API_KEY=your-api-key
+AGENT4DESIGN_LLM_MODEL=VIO:Claude 4.6 Sonnet
+AGENT4DESIGN_LLM_BASE_URL=https://vio.automotive-wan.com:446
+AGENT4DESIGN_LLM_TEMPERATURE=0.1
+AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS=30
+AGENT4DESIGN_LLM_MAX_RETRIES=3
+AGENT4DESIGN_LLM_HEADERS={"useLegacyCompletionsEndpoint":"false","X-Tenant-ID":"default_tenant"}
+```
+
+Legacy names are also accepted, but they must still be written in `.env`:
+
+```dotenv
+API_TOKEN=your-api-key
+BASE_URL=https://vio.automotive-wan.com:446
+VIO_HEADERS={"useLegacyCompletionsEndpoint":"false","X-Tenant-ID":"default_tenant"}
+```
+
+HTTP / MCP token:
+
+```dotenv
+AGENT4DESIGN_API_TOKEN=your-api-token
+AGENT4DESIGN_MCP_TOKEN=your-mcp-token
+```
+
+Standalone activity XMI import:
+
+```dotenv
+AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat
+AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
+AGENT4DESIGN_XMI_OUTPUT_DIR=xmi_read
+AGENT4DESIGN_XMI_LOG_DIR=xmi_import_logs
+AGENT4DESIGN_XMI_TIMEOUT=600
+```
+
+SSL / CA settings:
+
+```dotenv
+AGENT4DESIGN_LLM_SSL_VERIFY=true
+AGENT4DESIGN_LLM_CA_BUNDLE=C:\path\to\vio_root_ca.pem
+```
+
+Temporary certificate bypass:
+
+```dotenv
+AGENT4DESIGN_LLM_SSL_VERIFY=false
+```
+
+### Rhapsody Workflow
+
+1. Open IBM Rhapsody.
+2. Load the target project.
+3. Select a writable target in the Rhapsody browser.
+4. If you want to create functions, select a `Class` or `Block`.
+5. Initialize the Agent4Design context:
+
+```text
+initialize_rhapsody
+```
+
+After changing the GUI selection, refresh the target:
+
+```text
+select_rhapsody_target
+```
+
+Recommended sync flow:
+
+```text
+initialize_rhapsody
+  -> refresh_type_registry
+  -> plan_agent4design_sync
+  -> review the plan
+  -> execute_agent4design_sync(approved=true)
+  -> verify_rhapsody_model
+  -> save_rhapsody_project(approved=true)
+```
+
+### Function Target Rule
+
+Function sync only writes to `Class` or `Block`, creating Rhapsody `Operation`
+elements.
+
+If the selected target is a `Module`, planning and execution reject the function
+write to avoid COM errors such as:
+
+```text
+Unexpected error (-2147221495)
+```
+
+Fix:
+
+```text
+Select a Class or Block in Rhapsody
+Call select_rhapsody_target
+Run plan / execute again
+```
+
+Retrying the same request will not fix an invalid target metaclass.
+
+### Tools
+
+`Agent4DesignService` exposes:
+
+```text
+initialize_rhapsody
+select_rhapsody_target
+get_rhapsody_context
+refresh_type_registry
+save_type_index
+load_type_index
+extract_code_path_model
+plan_code_path_modeling
+execute_code_path_modeling
+plan_agent4design_sync
+execute_agent4design_sync
+verify_rhapsody_model
+save_rhapsody_project
+```
+
+Tool summary:
+
+```text
+initialize_rhapsody          Connect to Rhapsody and optionally select the GUI target
+select_rhapsody_target      Refresh the writable target from the GUI selection
+get_rhapsody_context        Return active project and target summary
+refresh_type_registry       Scan Type / Class metadata
+save_type_index             Save type metadata for diagnostics
+load_type_index             Load type metadata
+extract_code_path_model     Segment C code and extract model specs through LLM JSON
+plan_code_path_modeling     Build a read-only plan from a code path
+execute_code_path_modeling  Execute approved code-path modeling
+plan_agent4design_sync      Build a read-only plan from structured specs
+execute_agent4design_sync   Execute approved COM / XMI writes and verify
+verify_rhapsody_model       Verify expected model elements read-only
+save_rhapsody_project       Save the active project after approval
+```
+
+### Code Path Extraction
+
+`extract_code_path_model` does not parse C with regex. The flow is:
+
+```text
+source path
+  -> tree-sitter syntax segments
+  -> original source, lines, byte offsets, and context per segment
+  -> strict JSON extraction by LLM
+  -> Pydantic validation
+  -> merged Rhapsody model specs
+```
+
+Install parser support:
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+When using the LLM CLI, the LLM adapter injects the same OpenAI-compatible
+client as the code segment extractor.
+
+When calling through HTTP / MCP without an internal LLM extractor, request
+segments only:
+
+```json
+{
+  "path": "src",
+  "recursive": true,
+  "include_headers": true,
+  "include_activities": true,
+  "require_model_extraction": false
+}
+```
+
+Each returned segment includes:
+
+```text
+path
+language
+kind
+symbol
+start_line / end_line
+start_byte / end_byte
+source
+context
+```
+
+After LLM extraction, merged output includes:
+
+```text
+macros
+variables
+functions
+activities
+warnings
+errors
+```
+
+### HTTP API
+
+Start:
+
+```powershell
+python -m agent4design.adapters.http
+```
+
+Default address:
+
+```text
+http://127.0.0.1:8765
+```
+
+Health and tool discovery:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/health
+Invoke-RestMethod http://127.0.0.1:8765/tools
+```
+
+Generic tool call:
+
+```powershell
+$body = @{
+  name = "initialize_rhapsody"
+  arguments = @{ select_current_target = $true }
+} | ConvertTo-Json -Depth 10
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8765/call `
+  -ContentType application/json `
+  -Body $body
+```
+
+Named tool call:
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8765/tools/get_rhapsody_context `
+  -ContentType application/json `
+  -Body "{}"
+```
+
+Listening outside localhost requires:
+
+```dotenv
+AGENT4DESIGN_API_TOKEN=your-token
+```
+
+### MCP Server
+
+Local stdio MCP:
+
+```powershell
+python -m agent4design.adapters.mcp --transport stdio
+```
+
+Remote streamable HTTP MCP:
+
+```powershell
+python -m agent4design.adapters.mcp `
+  --transport streamable-http `
+  --host 0.0.0.0 `
+  --port 8766 `
+  --path /mcp `
+  --token your-secret-token
+```
+
+Remote MCP still operates the Rhapsody desktop session on the Windows machine
+running the server. Do not expose it directly to the public Internet.
+
+### LLM Agent
+
+Interactive read-only mode:
+
+```powershell
+python -m agent4design.adapters.llm
+```
+
+One-shot mode:
+
+```powershell
+python -m agent4design.adapters.llm --message "Inspect the selected Rhapsody target."
+```
+
+Allow write requests with terminal approval:
+
+```powershell
+python -m agent4design.adapters.llm --allow-writes
+```
+
+Safety boundary:
+
+- The model-visible schema does not include `approved`.
+- Model-generated `approved=true` is overwritten locally.
+- Writes are rejected unless the local approval handler approves them.
+- Success must be based on tool results.
+
+### LangGraph Workflow
+
+LangGraph is optional and provides a resumable plan / approval / execute /
+verify workflow.
+
+Install:
+
+```powershell
+python -m pip install -e ".[graph]"
+```
+
+Main entry points:
+
+```text
+agent4design.workflows.sync_graph.build_sync_graph
+agent4design.workflows.sync_graph.create_sqlite_checkpointer
+```
+
+The workflow still calls `Agent4DesignService`; it does not access COM
+directly.
+
+### Activity XMI Import
+
+Activity import requires IBM Rhapsody XMI Toolkit. Without Toolkit
+configuration, import fails with:
+
+```text
+Activity sync is not configured
+```
+
+This is a startup configuration issue, not a retryable request issue. Edit
+`.env` and restart the HTTP, MCP, or LLM Agent service.
+
+Activity import is still experimental. Generated XMI is imported as a
+standalone Activity Package, and Function-to-Activity ownership mapping still
+needs confirmation through manual XMI export experiments.
+
+### Project Structure
+
+```text
+Agent4Design/
+  README.md
+  pyproject.toml
+  agent4design/
+    adapters/
+      http/               Local JSON-over-HTTP API
+      llm/                OpenAI-compatible tool-calling Agent
+      mcp/                MCP Server adapter
+    docs/                 Design notes, API docs, legacy references
+    domain/
+      models.py           Pydantic data contracts
+      validators.py       Activity graph validators
+    rhapsody/
+      com_runtime.py      COM STA thread dispatcher
+      context.py          Rhapsody app/project/target context
+      repository.py       COM read/write repository
+      type_registry.py    Type / Class metadata index
+      verifier.py         Read-only verifier
+    services/
+      agent_service.py    Stable Agent-facing facade
+      code_extractor.py   tree-sitter segmentation and LLM extraction protocol
+      model_sync.py       Macro, variable, function sync service
+      sync_plan.py        Read-only planning before writes
+      verification.py     Verification service wrapper
+      activity_sync.py    XMI generation and import service
+    tools/
+      tool.py             Shared helper functions
+    workflows/
+      sync_graph.py       LangGraph builder
+      nodes.py            Workflow nodes
+      state.py            Workflow state
+    xmi/
+      generator.py        Activity XMI generation
+      importer.py         XMI Toolkit invocation
+  tests/                  Offline tests
+  legacy/                 Historical experiment scripts
+```
+
+### Design Boundaries
+
+Core boundary:
+
+```text
+external adapter
+  -> Agent4DesignService.call(name, arguments)
+  -> Pydantic request validation
+  -> service layer
+  -> repository / XMI toolkit
+```
+
+Principles:
+
+- Adapters only translate protocols.
+- Services orchestrate application behavior.
+- The Rhapsody layer owns COM details.
+- The XMI layer owns file generation and import.
+- The LLM calls tools and extracts strict JSON; it does not operate COM directly.
+
+### Troubleshooting
+
+#### `-2147221495`
+
+Usually the selected target cannot accept functions, for example a `Module`.
+
+Fix:
+
+```text
+Select a Class or Block
+Call select_rhapsody_target
+Run plan / execute again
+```
+
+#### `Activity sync is not configured`
+
+XMI Toolkit is not configured.
+
+Fix:
+
+```dotenv
+AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat
+AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
+```
+
+Then restart the service.
+
+#### Custom type not found
+
+Unknown custom types are rejected by default to avoid polluting the model with
+typos.
+
+Fix:
+
+```text
+Create the correct type in Rhapsody first
+or set AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE=true in .env
+```
+
+#### LLM API key is not picked up
+
+Make sure the key is written in `.env`, not in the OS environment.
+
+Preferred:
+
+```dotenv
+AGENT4DESIGN_LLM_API_KEY=...
+```
+
+Legacy-compatible:
+
+```dotenv
+API_TOKEN=...
+```
+
+#### tree-sitter missing
+
+Install parser support:
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+### Testing
+
+Run offline tests:
+
+```powershell
+python -m pytest -q
+```
+
+If the machine has multiple Python installations, use the interpreter that has
+the project dependencies:
+
+```powershell
+D:\Environment\miniconda\python.exe -m pytest -q
+```
+
+Compile check:
+
+```powershell
+python -m compileall -q agent4design tests
+```

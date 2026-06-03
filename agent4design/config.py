@@ -1,30 +1,45 @@
-"""Environment-backed configuration for local Agent4Design adapters."""
+""".env-backed configuration for local Agent4Design adapters."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Mapping, Optional
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
+DEFAULT_VIO_BASE_URL = "https://vio.automotive-wan.com:446"
+DEFAULT_VIO_MODEL = "VIO:Claude 4.6 Sonnet"
+
+
+def _env_value(values: Mapping[str, str], name: str, default: str = "") -> str:
+    value = values.get(name)
+    if value is None:
+        return default
+    return str(value)
+
+
+def _env_bool(values: Mapping[str, str], name: str, default: bool) -> bool:
+    value = values.get(name)
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
+def _env_int(values: Mapping[str, str], name: str, default: int) -> int:
+    value = values.get(name)
     return int(value) if value else default
 
 
-def _env_json(name: str) -> Optional[dict]:
-    value = os.getenv(name, "").strip()
+def _env_float(values: Mapping[str, str], name: str, default: float) -> float:
+    value = values.get(name)
+    return float(value) if value else default
+
+
+def _env_json(values: Mapping[str, str], name: str) -> Optional[dict]:
+    value = _env_value(values, name).strip()
     if not value:
         return None
 
@@ -32,22 +47,30 @@ def _env_json(name: str) -> Optional[dict]:
         parsed = json.loads(value)
     except ValueError as exc:
         raise ValueError(
-            f"Environment variable {name} must be valid JSON. "
+            f".env setting {name} must be valid JSON. "
             f"Current value: {value}"
         ) from exc
 
     if not isinstance(parsed, dict):
         raise ValueError(
-            f"Environment variable {name} must be a JSON object. "
+            f".env setting {name} must be a JSON object. "
             f"Current value: {value}"
         )
 
     return parsed
 
 
-def _load_env_files() -> None:
+def _env_json_first(values: Mapping[str, str], *names: str) -> Optional[dict]:
+    for name in names:
+        parsed = _env_json(values, name)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _load_env_values() -> Dict[str, str]:
     """
-    Load .env files in a stable order.
+    Read .env files in a stable order without consulting process environment.
 
     Priority:
     1. Current working directory .env
@@ -59,7 +82,8 @@ def _load_env_files() -> None:
     3. Package directory .env
        Example: C:\\Users\\uik00187\\Desktop\\Agent4Design\\agent4design\\.env
 
-    Existing real environment variables are not overwritten.
+    Earlier files win. OS-level environment variables are intentionally ignored
+    so runtime configuration is controlled only by editing .env files.
     """
     current_file = Path(__file__).resolve()
     package_dir = current_file.parent
@@ -72,6 +96,7 @@ def _load_env_files() -> None:
     ]
 
     loaded = set()
+    values: Dict[str, str] = {}
     for env_path in candidates:
         env_path = env_path.resolve()
         if env_path in loaded:
@@ -79,7 +104,11 @@ def _load_env_files() -> None:
         loaded.add(env_path)
 
         if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=False)
+            for name, value in dotenv_values(env_path).items():
+                if value is not None:
+                    values.setdefault(name, value)
+
+    return values
 
 
 @dataclass(frozen=True)
@@ -105,9 +134,11 @@ class Agent4DesignSettings:
     api_token: Optional[str] = None
 
     llm_api_key: Optional[str] = None
-    llm_base_url: Optional[str] = None
-    llm_model: Optional[str] = None
-    llm_max_tool_rounds: int = 8
+    llm_base_url: Optional[str] = DEFAULT_VIO_BASE_URL
+    llm_model: Optional[str] = DEFAULT_VIO_MODEL
+    llm_max_tool_rounds: int = 30
+    llm_temperature: float = 0.1
+    llm_max_retries: int = 3
     llm_header: Optional[dict] = None
 
     # SSL / certificate settings for OpenAI-compatible LLM endpoint.
@@ -122,64 +153,68 @@ class Agent4DesignSettings:
 
     @classmethod
     def from_env(cls) -> "Agent4DesignSettings":
-        """Load settings from .env and process environment variables."""
+        """Load settings only from .env files."""
 
-        _load_env_files()
+        values = _load_env_values()
 
-        toolkit = os.getenv("AGENT4DESIGN_XMI_TOOLKIT_BAT", "").strip()
-        ca_bundle = os.getenv("AGENT4DESIGN_LLM_CA_BUNDLE", "").strip()
+        toolkit = _env_value(values, "AGENT4DESIGN_XMI_TOOLKIT_BAT").strip()
+        ca_bundle = _env_value(values, "AGENT4DESIGN_LLM_CA_BUNDLE").strip()
 
         return cls(
             xmi_toolkit_bat=Path(toolkit) if toolkit else None,
             xmi_output_dir=Path(
-                os.getenv("AGENT4DESIGN_XMI_OUTPUT_DIR", "xmi_read")
+                _env_value(values, "AGENT4DESIGN_XMI_OUTPUT_DIR", "xmi_read")
             ),
             xmi_log_dir=Path(
-                os.getenv("AGENT4DESIGN_XMI_LOG_DIR", "xmi_import_logs")
+                _env_value(values, "AGENT4DESIGN_XMI_LOG_DIR", "xmi_import_logs")
             ),
-            xmi_timeout=_env_int("AGENT4DESIGN_XMI_TIMEOUT", 600),
+            xmi_timeout=_env_int(values, "AGENT4DESIGN_XMI_TIMEOUT", 600),
 
             create_placeholder_type=_env_bool(
+                values,
                 "AGENT4DESIGN_CREATE_PLACEHOLDER_TYPE",
                 False,
             ),
             enable_activity_import=_env_bool(
+                values,
                 "AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT",
                 bool(toolkit),
             ),
             require_write_approval=_env_bool(
+                values,
                 "AGENT4DESIGN_REQUIRE_WRITE_APPROVAL",
                 True,
             ),
 
             mcp_transport=(
-                os.getenv("AGENT4DESIGN_MCP_TRANSPORT", "stdio").strip()
+                _env_value(values, "AGENT4DESIGN_MCP_TRANSPORT", "stdio").strip()
                 or "stdio"
             ),
             mcp_host=(
-                os.getenv(
+                _env_value(
+                    values,
                     "AGENT4DESIGN_MCP_HOST",
-                    os.getenv("AGENT4DESIGN_API_HOST", "127.0.0.1"),
+                    _env_value(values, "AGENT4DESIGN_API_HOST", "127.0.0.1"),
                 ).strip()
                 or "127.0.0.1"
             ),
-            mcp_port=_env_int("AGENT4DESIGN_MCP_PORT", 8766),
+            mcp_port=_env_int(values, "AGENT4DESIGN_MCP_PORT", 8766),
             mcp_path=(
-                os.getenv("AGENT4DESIGN_MCP_PATH", "/mcp").strip()
+                _env_value(values, "AGENT4DESIGN_MCP_PATH", "/mcp").strip()
                 or "/mcp"
             ),
             mcp_token=(
-                os.getenv("AGENT4DESIGN_MCP_TOKEN", "").strip()
-                or os.getenv("AGENT4DESIGN_API_TOKEN", "").strip()
+                _env_value(values, "AGENT4DESIGN_MCP_TOKEN").strip()
+                or _env_value(values, "AGENT4DESIGN_API_TOKEN").strip()
                 or None
             ),
             api_host=(
-                os.getenv("AGENT4DESIGN_API_HOST", "127.0.0.1").strip()
+                _env_value(values, "AGENT4DESIGN_API_HOST", "127.0.0.1").strip()
                 or "127.0.0.1"
             ),
-            api_port=_env_int("AGENT4DESIGN_API_PORT", 8765),
+            api_port=_env_int(values, "AGENT4DESIGN_API_PORT", 8765),
             api_token=(
-                os.getenv("AGENT4DESIGN_API_TOKEN", "").strip()
+                _env_value(values, "AGENT4DESIGN_API_TOKEN").strip()
                 or None
             ),
 
@@ -188,28 +223,45 @@ class Agent4DesignSettings:
             # 2. OPENAI_API_KEY: common OpenAI-compatible variable
             # 3. API_TOKEN: official VIO template variable
             llm_api_key=(
-                os.getenv("AGENT4DESIGN_LLM_API_KEY", "").strip()
-                or os.getenv("OPENAI_API_KEY", "").strip()
-                or os.getenv("API_TOKEN", "").strip()
+                _env_value(values, "AGENT4DESIGN_LLM_API_KEY").strip()
+                or _env_value(values, "OPENAI_API_KEY").strip()
+                or _env_value(values, "API_TOKEN").strip()
                 or None
             ),
             llm_base_url=(
-                os.getenv("AGENT4DESIGN_LLM_BASE_URL", "").strip()
-                or os.getenv("OPENAI_BASE_URL", "").strip()
-                or None
+                _env_value(values, "AGENT4DESIGN_LLM_BASE_URL").strip()
+                or _env_value(values, "OPENAI_BASE_URL").strip()
+                or _env_value(values, "BASE_URL").strip()
+                or DEFAULT_VIO_BASE_URL
             ),
             llm_model=(
-                os.getenv("AGENT4DESIGN_LLM_MODEL", "").strip()
-                or os.getenv("OPENAI_MODEL", "").strip()
-                or None
+                _env_value(values, "AGENT4DESIGN_LLM_MODEL").strip()
+                or _env_value(values, "OPENAI_MODEL").strip()
+                or DEFAULT_VIO_MODEL
             ),
             llm_max_tool_rounds=_env_int(
+                values,
                 "AGENT4DESIGN_LLM_MAX_TOOL_ROUNDS",
-                8,
+                30,
             ),
-            llm_header=_env_json("VIO_HEADERS"),
+            llm_temperature=_env_float(
+                values,
+                "AGENT4DESIGN_LLM_TEMPERATURE",
+                0.1,
+            ),
+            llm_max_retries=_env_int(
+                values,
+                "AGENT4DESIGN_LLM_MAX_RETRIES",
+                3,
+            ),
+            llm_header=_env_json_first(
+                values,
+                "AGENT4DESIGN_LLM_HEADERS",
+                "VIO_HEADERS",
+            ),
 
             llm_ssl_verify=_env_bool(
+                values,
                 "AGENT4DESIGN_LLM_SSL_VERIFY",
                 True,
             ),
@@ -217,7 +269,11 @@ class Agent4DesignSettings:
         )
 
 
-def build_agent_service(settings: Optional[Agent4DesignSettings] = None):
+def build_agent_service(
+    settings: Optional[Agent4DesignSettings] = None,
+    *,
+    code_model_extractor=None,
+):
     """Construct the framework-neutral service from adapter configuration."""
     from agent4design.rhapsody.context import rhapsody_context
     from agent4design.rhapsody.repository import RhapsodyRepository
@@ -255,5 +311,6 @@ def build_agent_service(settings: Optional[Agent4DesignSettings] = None):
         type_registry=registry,
         repository=repository,
         activity_sync_service=activity_sync_service,
+        code_model_extractor=code_model_extractor,
         require_write_approval=resolved.require_write_approval,
     )

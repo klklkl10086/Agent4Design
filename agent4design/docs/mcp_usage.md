@@ -21,7 +21,7 @@ python -m pip install -e ".[mcp]"
 For development or all adapters:
 
 ```powershell
-python -m pip install -e ".[rhapsody,mcp,graph,llm,dev]"
+python -m pip install -e ".[rhapsody,parser,mcp,graph,llm,dev]"
 ```
 
 ## Mode 1: Local MCP
@@ -61,7 +61,7 @@ python -m agent4design.adapters.mcp `
   --token your-secret-token
 ```
 
-Equivalent environment variables:
+Equivalent `.env` settings:
 
 ```powershell
 AGENT4DESIGN_MCP_TRANSPORT=streamable-http
@@ -104,6 +104,28 @@ For write tools, approval is still required:
 6. Review the plan.
 7. Call the corresponding execute tool with `approved=true`.
 8. Call `save_rhapsody_project` with `approved=true` if needed.
+
+## Code Path Extraction
+
+`extract_code_path_model` uses tree-sitter for syntax segmentation. Install:
+
+```powershell
+python -m pip install -e ".[parser]"
+```
+
+MCP itself does not automatically provide an internal LLM extractor. If the MCP
+client wants to receive parser chunks and do semantic extraction outside the
+server, call:
+
+```json
+{
+  "path": "src",
+  "require_model_extraction": false
+}
+```
+
+The response includes `segments` with original source text, line ranges, byte
+offsets, and local context snippets.
 
 ## Security Notes
 

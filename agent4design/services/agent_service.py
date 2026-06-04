@@ -18,6 +18,7 @@ from agent4design.services.code_extractor import (
     CodePathExtractionRequest,
     CodePathExtractionResult,
     ExtractedActivitySpec,
+    TreeSitterCodeSegmenter,
     extract_code_path_model,
 )
 from agent4design.services.model_sync import (
@@ -54,6 +55,35 @@ class TypeIndexPathRequest(StrictModel):
     """Filesystem location for a serializable type metadata index."""
 
     path: str = Field(..., min_length=1)
+
+
+class ReadCodePathRequest(StrictModel):
+    """Read a C/H source file so the Agent model can reason over CODE directly."""
+
+    path: str = Field(..., min_length=1)
+    max_bytes: int = Field(120_000, ge=1)
+    encoding: str = "auto"
+    chunk_index: int = Field(0, ge=0)
+    max_chunk_chars: int = Field(30_000, ge=1)
+    syntax_chunks: bool = True
+
+
+class ReadCodePathResult(StrictModel):
+    """Source code content returned to the Agent model."""
+
+    path: str
+    bytes_read: int
+    encoding: str
+    truncated: bool = False
+    chunk_index: int = 0
+    chunk_count: int = 1
+    has_more: bool = False
+    next_chunk_index: Optional[int] = None
+    chunk_start_line: int = 1
+    chunk_end_line: int = 1
+    chunk_segment_count: int = 0
+    content: str
+    error: str = ""
 
 
 class ActivitySyncRequest(StrictModel):
@@ -265,6 +295,164 @@ class Agent4DesignService:
             "path": str(Path(request.path).resolve()),
             "type_count": len(self.type_registry.references),
         }
+
+    @staticmethod
+    def _decode_code_bytes(
+        data: bytes,
+        encoding: str,
+    ) -> tuple[str, str, str]:
+        encodings = (
+            [encoding]
+            if encoding and encoding.lower() != "auto"
+            else ["utf-8-sig", "utf-8", "gbk", "gb2312", "latin-1"]
+        )
+        last_error = ""
+        for candidate in encodings:
+            try:
+                return data.decode(candidate), candidate, ""
+            except UnicodeDecodeError as exc:
+                last_error = str(exc)
+
+        return data.decode("utf-8", errors="replace"), "utf-8-replace", last_error
+
+    @staticmethod
+    def _line_chunks(
+        content: str,
+        max_chunk_chars: int,
+    ) -> List[tuple[str, int, int, int]]:
+        lines = content.splitlines()
+        if not lines:
+            return [("", 1, 1, 0)]
+
+        chunks: List[tuple[str, int, int, int]] = []
+        current: List[str] = []
+        start_line = 1
+        current_chars = 0
+
+        for index, line in enumerate(lines, start=1):
+            line_chars = len(line) + 1
+            if current and current_chars + line_chars > max_chunk_chars:
+                chunks.append(("\n".join(current), start_line, index - 1, 0))
+                current = []
+                start_line = index
+                current_chars = 0
+            current.append(line)
+            current_chars += line_chars
+
+        if current:
+            chunks.append(("\n".join(current), start_line, len(lines), 0))
+
+        return chunks
+
+    @staticmethod
+    def _syntax_chunks(
+        path: Path,
+        content: str,
+        request: ReadCodePathRequest,
+    ) -> List[tuple[str, int, int, int]]:
+        try:
+            segments = TreeSitterCodeSegmenter().segment_file(
+                path,
+                content,
+                CodePathExtractionRequest(
+                    path=str(path),
+                    include_segments=True,
+                    require_model_extraction=False,
+                    max_context_segments=0,
+                ),
+            )
+        except Exception:
+            return Agent4DesignService._line_chunks(
+                content,
+                request.max_chunk_chars,
+            )
+
+        if not segments:
+            return Agent4DesignService._line_chunks(
+                content,
+                request.max_chunk_chars,
+            )
+
+        lines = content.splitlines()
+        line_count = max(1, len(lines))
+        chunks: List[tuple[str, int, int, int]] = []
+        start_line = 1
+        end_line = 1
+        segment_count = 0
+
+        for segment in sorted(segments, key=lambda item: item.start_byte):
+            candidate_end = min(max(segment.end_line, 1), line_count)
+            candidate = "\n".join(lines[start_line - 1 : candidate_end])
+            if (
+                segment_count > 0
+                and len(candidate) > request.max_chunk_chars
+            ):
+                text = "\n".join(lines[start_line - 1 : end_line])
+                chunks.append((text, start_line, end_line, segment_count))
+                start_line = end_line + 1
+                candidate_end = min(max(segment.end_line, start_line), line_count)
+                segment_count = 0
+
+            end_line = candidate_end
+            segment_count += 1
+
+        if end_line < line_count:
+            end_line = line_count
+
+        text = "\n".join(lines[start_line - 1 : end_line])
+        chunks.append((text, start_line, end_line, segment_count))
+        return chunks
+
+    @staticmethod
+    def read_code_path(request: ReadCodePathRequest) -> ReadCodePathResult:
+        """Read source code text for direct LLM-to-tool JSON generation."""
+        path = Path(request.path).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Code file not found: {path}")
+
+        data = path.read_bytes()
+        truncated = len(data) > request.max_bytes
+        if truncated:
+            data = data[: request.max_bytes]
+
+        content, encoding, error = Agent4DesignService._decode_code_bytes(
+            data,
+            request.encoding,
+        )
+        chunks = (
+            Agent4DesignService._syntax_chunks(path, content, request)
+            if request.syntax_chunks
+            else Agent4DesignService._line_chunks(content, request.max_chunk_chars)
+        )
+
+        if request.chunk_index >= len(chunks):
+            raise IndexError(
+                f"chunk_index {request.chunk_index} is out of range; "
+                f"available chunks: {len(chunks)}"
+            )
+
+        chunk_content, start_line, end_line, segment_count = chunks[request.chunk_index]
+        next_chunk_index = (
+            request.chunk_index + 1
+            if request.chunk_index + 1 < len(chunks)
+            else None
+        )
+
+        return ReadCodePathResult(
+            path=str(path),
+            bytes_read=len(data),
+            encoding=encoding,
+            truncated=truncated,
+            chunk_index=request.chunk_index,
+            chunk_count=len(chunks),
+            has_more=next_chunk_index is not None,
+            next_chunk_index=next_chunk_index,
+            chunk_start_line=start_line,
+            chunk_end_line=end_line,
+            chunk_segment_count=segment_count,
+            content=chunk_content,
+            error=error,
+        )
 
     def sync_model(self, request: ModelSyncRequest) -> ModelSyncResult:
         """Synchronize macros, variables, and functions through COM."""
@@ -518,9 +706,10 @@ class Agent4DesignService:
             ("refresh_type_registry", "Scan Type and Class metadata from the active project.", EmptyRequest),
             ("save_type_index", "Save the serializable type metadata index.", TypeIndexPathRequest),
             ("load_type_index", "Load type metadata for later COM relocation.", TypeIndexPathRequest),
-            ("extract_code_path_model", "Segment C code with a parser and extract model specs through the configured LLM extractor.", CodePathExtractionRequest),
-            ("plan_code_path_modeling", "Extract code and build a read-only modeling plan.", CodePathModelingRequest),
-            ("execute_code_path_modeling", "Extract code, execute approved Rhapsody modeling, and verify it.", ExecuteCodePathModelingRequest),
+            ("read_code_path", "Read a C/H file as CODE text, optionally split by syntax chunks. Use this first when the user provides a local code path. For each returned CODE chunk, generate plan_agent4design_sync JSON directly, then call read_code_path again with next_chunk_index when has_more=true.", ReadCodePathRequest),
+            ("extract_code_path_model", "Legacy parser/LLM extractor for diagnostics only. Do not use for normal CODE-to-tool JSON modeling unless explicitly requested.", CodePathExtractionRequest),
+            ("plan_code_path_modeling", "Legacy automatic code-path extractor plus modeling plan. Prefer read_code_path followed by plan_agent4design_sync.", CodePathModelingRequest),
+            ("execute_code_path_modeling", "Legacy automatic code-path extractor plus approved execution. Prefer read_code_path followed by execute_agent4design_sync after approval.", ExecuteCodePathModelingRequest),
             ("plan_agent4design_sync", "Build a read-only synchronization plan for approval.", AgentSyncRequest),
             ("execute_agent4design_sync", "Execute an explicitly approved synchronization and verify the result.", ExecuteSyncRequest),
             ("verify_rhapsody_model", "Run read-only verification against the active Rhapsody project.", VerificationRequest),
@@ -544,6 +733,7 @@ class Agent4DesignService:
             "refresh_type_registry": (EmptyRequest, self.refresh_type_registry),
             "save_type_index": (TypeIndexPathRequest, self.save_type_index),
             "load_type_index": (TypeIndexPathRequest, self.load_type_index),
+            "read_code_path": (ReadCodePathRequest, self.read_code_path),
             "extract_code_path_model": (CodePathExtractionRequest, self.extract_code_path_model),
             "plan_code_path_modeling": (CodePathModelingRequest, self.plan_code_path_modeling),
             "execute_code_path_modeling": (ExecuteCodePathModelingRequest, self.execute_code_path_modeling),

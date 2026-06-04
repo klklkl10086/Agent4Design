@@ -149,6 +149,15 @@ def create_mcp_server(
         return _dump(agent_service.call("load_type_index", {"path": path}))
 
     @mcp.tool()
+    def read_code_path(
+        request: Dict[str, Any],
+        auth_token: str = "",
+    ) -> Dict[str, Any]:
+        """Read a C/H file as CODE text, optionally syntax-chunked."""
+        require_token(auth_token)
+        return _dump(agent_service.call("read_code_path", request))
+
+    @mcp.tool()
     def extract_code_path_model(
         request: Dict[str, Any],
         auth_token: str = "",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any, Dict
 
 from agent4design.adapters.llm.openai_compatible import (
@@ -17,6 +18,14 @@ def _approval_handler(name: str, arguments: Dict[str, Any]) -> bool:
     print(json.dumps(arguments, ensure_ascii=False, indent=2))
     answer = input("Approve this Rhapsody write? [y/N] ").strip().lower()
     return answer in {"y", "yes"}
+
+
+def _print_delta(text: str) -> None:
+    print(text, end="", flush=True)
+
+
+def _print_status(message: str) -> None:
+    print(f"\n[{message}]", file=sys.stderr, flush=True)
 
 
 def main() -> None:
@@ -40,8 +49,15 @@ def main() -> None:
     messages = None
 
     if args.message:
-        result = agent.run(args.message)
-        print(result.response)
+        try:
+            agent.run_stream(
+                args.message,
+                on_delta=_print_delta,
+                on_status=_print_status,
+            )
+        except Exception as exc:
+            print(f"\n[Agent error: {exc}]", file=sys.stderr, flush=True)
+        print()
         return
 
     print("Agent4Design Agent ready. Type 'exit' to stop.")
@@ -55,9 +71,18 @@ def main() -> None:
             continue
         if user_message.lower() in {"exit", "quit"}:
             return
-        result = agent.run(user_message, messages=messages)
-        messages = result.messages
-        print(f"\nAgent> {result.response}")
+        try:
+            print("\nAgent> ", end="", flush=True)
+            result = agent.run_stream(
+                user_message,
+                messages=messages,
+                on_delta=_print_delta,
+                on_status=_print_status,
+            )
+            messages = result.messages
+            print()
+        except Exception as exc:
+            print(f"\n[Agent error: {exc}]", file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

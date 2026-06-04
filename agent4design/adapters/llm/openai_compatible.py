@@ -6,7 +6,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import time
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
 import httpx
 from pydantic import Field
@@ -14,8 +14,10 @@ from pydantic import Field
 from agent4design.config import Agent4DesignSettings, build_agent_service
 from agent4design.domain.models import StrictModel
 from agent4design.services.code_extractor import (
+    CodeBatchExtraction,
     CodeSegmentExtraction,
     CodeSyntaxSegment,
+    parse_batch_extraction_json,
     parse_segment_extraction_json,
 )
 from agent4design.services.agent_service import (
@@ -39,6 +41,22 @@ tool result reports success. Writes require approval from the human operator;
 you cannot grant approval yourself. Activity XMI import is experimental until
 Function ownership mapping is verified manually. Keep responses concise and
 surface rejected types or verification failures clearly.
+For C/H code, use the direct CODE-to-tool flow:
+1. If the user pastes CODE, read it from the message and generate the JSON
+   arguments for plan_agent4design_sync directly.
+2. If the user provides a local C/H file path, call read_code_path first, then
+   generate the JSON arguments for plan_agent4design_sync directly from the
+   returned CODE.
+3. read_code_path may return one syntax chunk at a time. After each CODE chunk,
+   call plan_agent4design_sync for the model elements visible in that chunk.
+   If has_more is true, call read_code_path again with next_chunk_index and
+   continue. Do not wait to read every chunk before calling tools.
+4. Do not call extract_code_path_model or plan_code_path_modeling unless the
+   user explicitly asks to use the legacy extractor.
+5. Extract only model elements needed by the sync tool: macros, variables, and
+   function signatures. Do not derive activity graphs from function bodies
+   unless the user explicitly asks for activity diagrams.
+Use execute_agent4design_sync only after human approval is available.
 """
 
 DEFAULT_VIO_HEADERS = {
@@ -48,12 +66,14 @@ DEFAULT_VIO_HEADERS = {
 
 CODE_EXTRACTION_SYSTEM_PROMPT = """\
 You extract IBM Rhapsody modeling specs from parser-identified C/C++ source
-segments. The segment boundary was produced by tree-sitter; do not invent code
+segments. Segment boundaries were produced by tree-sitter; do not invent code
 outside the provided source and context. Return JSON only. Match the provided
-schema. Use empty arrays when the segment does not define a model element.
+schema. Use empty arrays when a segment does not define a model element.
 """
 
 ApprovalHandler = Callable[[str, Dict[str, Any]], bool]
+StreamTextHandler = Callable[[str], None]
+StreamStatusHandler = Callable[[str], None]
 
 
 def _create_chat_completion_with_retries(
@@ -78,6 +98,129 @@ def _create_chat_completion_with_retries(
     if last_error is not None:
         raise last_error
     raise RuntimeError("Chat completion failed without an exception.")
+
+
+def _create_streaming_chat_completion_with_retries(
+    completions: Any,
+    *,
+    max_retries: int,
+    **kwargs: Any,
+) -> Iterable[Any]:
+    """Create a streaming chat completion with bounded startup retries."""
+    attempts = max(1, max_retries)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return completions.create(stream=True, **kwargs)
+        except TypeError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            time.sleep(min(60.0, 2.0 * (2 ** (attempt - 1))))
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Streaming chat completion failed without an exception.")
+
+
+def _value(payload: Any, name: str, default: Any = None) -> Any:
+    if isinstance(payload, dict):
+        return payload.get(name, default)
+    return getattr(payload, name, default)
+
+
+def _first_choice(payload: Any) -> Any:
+    choices = _value(payload, "choices", [])
+    return choices[0] if choices else None
+
+
+def _streamed_assistant_message(
+    chunks: Iterable[Any],
+    *,
+    on_delta: Optional[StreamTextHandler] = None,
+) -> Dict[str, Any]:
+    """Accumulate OpenAI-compatible streamed deltas into one assistant message."""
+    content_parts: List[str] = []
+    tool_calls: Dict[int, Dict[str, Any]] = {}
+
+    for chunk in chunks:
+        choice = _first_choice(chunk)
+        if choice is None:
+            continue
+
+        delta = _value(choice, "delta", None)
+        if delta is None:
+            continue
+
+        content = _value(delta, "content", None)
+        if content:
+            content_parts.append(content)
+            if on_delta is not None:
+                on_delta(content)
+
+        for tool_delta in _value(delta, "tool_calls", []) or []:
+            index = _value(tool_delta, "index", len(tool_calls))
+            current = tool_calls.setdefault(
+                index,
+                {
+                    "id": "",
+                    "type": "function",
+                    "function": {"name": "", "arguments": ""},
+                },
+            )
+
+            call_id = _value(tool_delta, "id", None)
+            if call_id:
+                current["id"] = call_id
+
+            call_type = _value(tool_delta, "type", None)
+            if call_type:
+                current["type"] = call_type
+
+            function_delta = _value(tool_delta, "function", None)
+            if function_delta is None:
+                continue
+
+            function = current["function"]
+            name = _value(function_delta, "name", None)
+            if name:
+                function["name"] += name
+
+            arguments = _value(function_delta, "arguments", None)
+            if arguments:
+                function["arguments"] += arguments
+
+    message: Dict[str, Any] = {
+        "role": "assistant",
+        "content": "".join(content_parts),
+    }
+    if tool_calls:
+        message["tool_calls"] = [
+            call for _, call in sorted(tool_calls.items(), key=lambda item: item[0])
+        ]
+    return message
+
+
+def _message_has_tool_calls(message: Dict[str, Any]) -> bool:
+    return bool(message.get("tool_calls"))
+
+
+def _tool_error_summary(result: AgentToolResult) -> str:
+    if result.error:
+        return result.error
+
+    output = result.output
+    errors = []
+    if hasattr(output, "errors"):
+        errors = getattr(output, "errors", []) or []
+    elif isinstance(output, dict):
+        errors = output.get("errors", []) or []
+
+    if errors:
+        return str(errors[0])
+
+    return ""
 
 
 class ToolExecutionRecord(StrictModel):
@@ -108,36 +251,22 @@ class OpenAICodeSegmentExtractor:
         temperature: float = 0.1,
         max_retries: int = 3,
         system_prompt: str = CODE_EXTRACTION_SYSTEM_PROMPT,
+        status_handler: Optional[StreamStatusHandler] = None,
     ) -> None:
         self.client = client
         self.model = model
         self.temperature = temperature
         self.max_retries = max_retries
         self.system_prompt = system_prompt
+        self.status_handler = status_handler
 
-    def extract(
+    def set_status_handler(
         self,
-        segment: CodeSyntaxSegment,
-        *,
-        include_activities: bool,
-    ) -> CodeSegmentExtraction:
-        schema = CodeSegmentExtraction.model_json_schema()
-        payload = segment.model_dump(mode="json")
-        payload["include_activities"] = include_activities
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "schema": schema,
-                        "segment": payload,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
+        status_handler: Optional[StreamStatusHandler],
+    ) -> None:
+        self.status_handler = status_handler
 
+    def _complete_json(self, messages: List[Dict[str, Any]]) -> str:
         kwargs = {
             "model": self.model,
             "messages": messages,
@@ -157,8 +286,117 @@ class OpenAICodeSegmentExtractor:
                 max_retries=self.max_retries,
                 **kwargs,
             )
-        content = completion.choices[0].message.content or "{}"
-        return parse_segment_extraction_json(content, segment_id=segment.id)
+        return completion.choices[0].message.content or "{}"
+
+    def extract(
+        self,
+        segment: CodeSyntaxSegment,
+        *,
+        include_activities: bool,
+    ) -> CodeSegmentExtraction:
+        label = segment.symbol or segment.id
+        if self.status_handler is not None:
+            self.status_handler(
+                "Extracting "
+                f"{segment.kind} {label} "
+                f"from {Path(segment.path).name}:{segment.start_line}..."
+            )
+
+        schema = CodeSegmentExtraction.model_json_schema()
+        payload = segment.model_dump(mode="json")
+        payload["include_activities"] = include_activities
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "schema": schema,
+                        "segment": payload,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        content = self._complete_json(messages)
+        result = parse_segment_extraction_json(content, segment_id=segment.id)
+
+        if self.status_handler is not None:
+            self.status_handler(
+                "Finished "
+                f"{segment.kind} {label} "
+                f"from {Path(segment.path).name}:{segment.start_line}."
+            )
+
+        return result
+
+    def extract_many(
+        self,
+        segments: List[CodeSyntaxSegment],
+        *,
+        include_activities: bool,
+    ) -> List[CodeSegmentExtraction]:
+        if not segments:
+            return []
+
+        first = segments[0]
+        last = segments[-1]
+        if self.status_handler is not None:
+            self.status_handler(
+                "Extracting "
+                f"{len(segments)} syntax segments from "
+                f"{Path(first.path).name}:{first.start_line}-"
+                f"{Path(last.path).name}:{last.end_line}..."
+            )
+
+        schema = CodeBatchExtraction.model_json_schema()
+        payload = [segment.model_dump(mode="json") for segment in segments]
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "schema": schema,
+                        "include_activities": include_activities,
+                        "segments": payload,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+
+        content = self._complete_json(messages)
+        result = parse_batch_extraction_json(content)
+        segment_results = list(result.segment_results)
+        if result.warnings or result.errors:
+            if segment_results:
+                first_result = segment_results[0]
+                segment_results[0] = first_result.model_copy(
+                    update={
+                        "warnings": [*first_result.warnings, *result.warnings],
+                        "errors": [*first_result.errors, *result.errors],
+                    }
+                )
+            else:
+                segment_results.append(
+                    CodeSegmentExtraction(
+                        segment_id=first.id,
+                        warnings=result.warnings,
+                        errors=result.errors,
+                    )
+                )
+
+        if self.status_handler is not None:
+            self.status_handler(
+                "Finished "
+                f"{len(segments)} syntax segments from "
+                f"{Path(first.path).name}:{first.start_line}-"
+                f"{Path(last.path).name}:{last.end_line}."
+            )
+
+        return segment_results
 
 
 def _jsonable(value: Any) -> Any:
@@ -336,6 +574,15 @@ class OpenAICompatibleAgent:
             result=self.service.call(name, call_arguments),
         )
 
+    def _set_code_extractor_status_handler(
+        self,
+        status_handler: Optional[StreamStatusHandler],
+    ) -> None:
+        extractor = getattr(self.service, "code_model_extractor", None)
+        setter = getattr(extractor, "set_status_handler", None)
+        if callable(setter):
+            setter(status_handler)
+
     def run(
         self,
         user_message: str,
@@ -417,6 +664,147 @@ class OpenAICompatibleAgent:
             f"{self.max_tool_rounds} tool rounds."
         )
 
+    def run_stream(
+        self,
+        user_message: str,
+        *,
+        messages: Optional[List[Dict[str, Any]]] = None,
+        on_delta: Optional[StreamTextHandler] = None,
+        on_status: Optional[StreamStatusHandler] = None,
+    ) -> AgentRunResult:
+        """
+        Run one user turn with streamed assistant text and tool progress events.
+
+        Tool-call rounds are streamed and accumulated before local execution.
+        When the model requests tools, status callbacks are emitted while the
+        local tool runs; the final assistant response is emitted through
+        ``on_delta`` as text deltas.
+        """
+        conversation = list(
+            messages
+            or [{"role": "system", "content": self.system_prompt}]
+        )
+        conversation.append({"role": "user", "content": user_message})
+
+        records: List[ToolExecutionRecord] = []
+        tools = self.tool_definitions()
+        self._set_code_extractor_status_handler(on_status)
+
+        try:
+            for _ in range(self.max_tool_rounds):
+                kwargs = {
+                    "model": self.model,
+                    "messages": list(conversation),
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "temperature": self.temperature,
+                }
+
+                try:
+                    chunks = _create_streaming_chat_completion_with_retries(
+                        self.client.chat.completions,
+                        max_retries=self.max_retries,
+                        **kwargs,
+                    )
+                    assistant_payload = _streamed_assistant_message(
+                        chunks,
+                        on_delta=on_delta,
+                    )
+                except TypeError:
+                    completion = _create_chat_completion_with_retries(
+                        self.client.chat.completions,
+                        max_retries=self.max_retries,
+                        **kwargs,
+                    )
+                    assistant_payload = _assistant_message(
+                        completion.choices[0].message
+                    )
+                    if not _message_has_tool_calls(assistant_payload):
+                        content = assistant_payload.get("content", "")
+                        if content and on_delta is not None:
+                            on_delta(content)
+                except Exception as exc:
+                    if on_status is not None:
+                        on_status(
+                            "Streaming response failed; retrying without "
+                            f"streaming: {exc}"
+                        )
+                    completion = _create_chat_completion_with_retries(
+                        self.client.chat.completions,
+                        max_retries=self.max_retries,
+                        **kwargs,
+                    )
+                    assistant_payload = _assistant_message(
+                        completion.choices[0].message
+                    )
+                    if not _message_has_tool_calls(assistant_payload):
+                        content = assistant_payload.get("content", "")
+                        if content and on_delta is not None:
+                            on_delta(content)
+
+                conversation.append(assistant_payload)
+
+                if not _message_has_tool_calls(assistant_payload):
+                    return AgentRunResult(
+                        response=assistant_payload.get("content", ""),
+                        tool_calls=records,
+                        messages=conversation,
+                    )
+
+                for tool_call in assistant_payload.get("tool_calls", []):
+                    function = tool_call.get("function", {})
+                    name = function.get("name", "")
+                    if on_status is not None:
+                        on_status(f"Calling tool: {name}")
+
+                    try:
+                        arguments = json.loads(
+                            function.get("arguments") or "{}"
+                        )
+
+                        if not isinstance(arguments, dict):
+                            raise ValueError(
+                                "Tool arguments must be a JSON object."
+                            )
+
+                        record = self._execute_tool(name, arguments)
+
+                    except Exception as exc:
+                        record = ToolExecutionRecord(
+                            name=name,
+                            result=AgentToolResult(
+                                name=name,
+                                success=False,
+                                error=str(exc),
+                            ),
+                        )
+
+                    records.append(record)
+
+                    if on_status is not None:
+                        outcome = "succeeded" if record.result.success else "failed"
+                        summary = _tool_error_summary(record.result)
+                        detail = f": {summary}" if summary else ""
+                        on_status(f"Tool {name} {outcome}{detail}.")
+
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.get("id", ""),
+                            "content": json.dumps(
+                                _jsonable(record.result),
+                                ensure_ascii=False,
+                            ),
+                        }
+                    )
+
+            raise RuntimeError(
+                "Model exceeded the configured limit of "
+                f"{self.max_tool_rounds} tool rounds."
+            )
+        finally:
+            self._set_code_extractor_status_handler(None)
+    
 
 def create_openai_compatible_agent(
     settings: Optional[Agent4DesignSettings] = None,

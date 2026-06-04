@@ -30,6 +30,12 @@ CodeSegmentKind = Literal[
     "preprocessor",
     "unknown",
 ]
+LLM_EXTRACTABLE_KINDS: set[CodeSegmentKind] = {
+    "function_definition",
+    "declaration",
+    "type_definition",
+    "preprocessor_define",
+}
 
 TREE_SITTER_NODE_KINDS: dict[str, CodeSegmentKind] = {
     "function_definition": "function_definition",
@@ -107,6 +113,14 @@ class CodeSegmentExtraction(StrictModel):
     errors: List[str] = Field(default_factory=list)
 
 
+class CodeBatchExtraction(StrictModel):
+    """Model specs extracted from a batch of syntax segments by an LLM."""
+
+    segment_results: List[CodeSegmentExtraction] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+
 class CodePathExtractionRequest(StrictModel):
     """A file or directory containing C source code to model."""
 
@@ -114,10 +128,14 @@ class CodePathExtractionRequest(StrictModel):
     recursive: bool = True
     include_headers: bool = True
     include_activities: bool = True
-    include_segments: bool = True
+    include_segments: bool = False
     require_model_extraction: bool = True
     max_file_bytes: int = Field(1_000_000, ge=1)
     max_segment_chars: int = Field(12_000, ge=1)
+    max_llm_segment_chars: int = Field(24_000, ge=1)
+    max_llm_segments: int = Field(80, ge=1)
+    max_llm_batch_chars: int = Field(60_000, ge=1)
+    max_llm_batch_segments: int = Field(40, ge=1)
     max_context_segments: int = Field(12, ge=0)
     segmenter: Literal["auto", "tree_sitter"] = "auto"
 
@@ -147,6 +165,14 @@ class CodeSegmentModelExtractor(Protocol):
         include_activities: bool,
     ) -> CodeSegmentExtraction:
         """Return strictly validated model specs for one syntax segment."""
+
+    def extract_many(
+        self,
+        segments: List[CodeSyntaxSegment],
+        *,
+        include_activities: bool,
+    ) -> List[CodeSegmentExtraction]:
+        """Return strictly validated model specs for multiple syntax segments."""
 
 
 class CodeSegmenter(Protocol):
@@ -497,6 +523,125 @@ def segment_code_path(
     return source_files, segments, warnings, errors
 
 
+def _batch_llm_segments(
+    segments: List[CodeSyntaxSegment],
+    request: CodePathExtractionRequest,
+) -> List[List[CodeSyntaxSegment]]:
+    batches: List[List[CodeSyntaxSegment]] = []
+    current: List[CodeSyntaxSegment] = []
+    current_chars = 0
+
+    for segment in segments:
+        segment_chars = len(segment.source)
+        would_exceed_segments = len(current) >= request.max_llm_batch_segments
+        would_exceed_chars = (
+            current_chars > 0
+            and current_chars + segment_chars > request.max_llm_batch_chars
+        )
+
+        if current and (would_exceed_segments or would_exceed_chars):
+            batches.append(current)
+            current = []
+            current_chars = 0
+
+        current.append(segment)
+        current_chars += segment_chars
+
+    if current:
+        batches.append(current)
+
+    return batches
+
+
+def _normalize_batch_results(
+    results: List[CodeSegmentExtraction],
+    segments: List[CodeSyntaxSegment],
+) -> List[CodeSegmentExtraction]:
+    by_id = {result.segment_id: result for result in results}
+    normalized: List[CodeSegmentExtraction] = []
+    seen: set[str] = set()
+
+    for segment in segments:
+        result = by_id.get(segment.id)
+        if result is None:
+            result = CodeSegmentExtraction(
+                segment_id=segment.id,
+                warnings=["LLM batch response omitted this segment."],
+            )
+        normalized.append(result)
+        seen.add(segment.id)
+
+    normalized.extend(
+        result for result in results if result.segment_id not in seen
+    )
+    return normalized
+
+
+def _extract_llm_segments(
+    segments: List[CodeSyntaxSegment],
+    request: CodePathExtractionRequest,
+    model_extractor: CodeSegmentModelExtractor,
+    warnings: List[str],
+) -> List[CodeSegmentExtraction]:
+    segment_results: List[CodeSegmentExtraction] = []
+    ready_segments: List[CodeSyntaxSegment] = []
+
+    for segment in segments:
+        if len(segment.source) > request.max_llm_segment_chars:
+            warning = (
+                f"Skipped oversized segment with {len(segment.source)} "
+                "characters, exceeding max_llm_segment_chars="
+                f"{request.max_llm_segment_chars}."
+            )
+            warnings.append(f"{segment.id}: {warning}")
+            segment_results.append(
+                CodeSegmentExtraction(
+                    segment_id=segment.id,
+                    warnings=[warning],
+                )
+            )
+            continue
+        ready_segments.append(segment)
+
+    batch_extractor = getattr(model_extractor, "extract_many", None)
+    if callable(batch_extractor):
+        for batch in _batch_llm_segments(ready_segments, request):
+            try:
+                results = batch_extractor(
+                    batch,
+                    include_activities=request.include_activities,
+                )
+                segment_results.extend(_normalize_batch_results(results, batch))
+            except Exception as exc:
+                segment_results.extend(
+                    CodeSegmentExtraction(
+                        segment_id=segment.id,
+                        errors=[str(exc)],
+                    )
+                    for segment in batch
+                )
+        return segment_results
+
+    for segment in ready_segments:
+        try:
+            result = model_extractor.extract(
+                segment,
+                include_activities=request.include_activities,
+            )
+            if result.segment_id != segment.id:
+                result = result.model_copy(update={"segment_id": segment.id})
+            segment_results.append(result)
+        except Exception as exc:
+            segment_results.append(
+                CodeSegmentExtraction(
+                    segment_id=segment.id,
+                    errors=[str(exc)],
+                )
+            )
+
+    return segment_results
+
+
 def extract_code_path_model(
     request: CodePathExtractionRequest,
     *,
@@ -535,23 +680,34 @@ def extract_code_path_model(
             errors=errors,
         )
 
-    segment_results: List[CodeSegmentExtraction] = []
-    for segment in segments:
-        try:
-            result = model_extractor.extract(
-                segment,
-                include_activities=request.include_activities,
-            )
-            if result.segment_id != segment.id:
-                result = result.model_copy(update={"segment_id": segment.id})
-            segment_results.append(result)
-        except Exception as exc:
-            segment_results.append(
-                CodeSegmentExtraction(
-                    segment_id=segment.id,
-                    errors=[str(exc)],
-                )
-            )
+    llm_segments = [
+        segment
+        for segment in segments
+        if segment.kind in LLM_EXTRACTABLE_KINDS
+    ]
+    skipped_non_model_segments = len(segments) - len(llm_segments)
+    if skipped_non_model_segments:
+        warnings.append(
+            "Skipped "
+            f"{skipped_non_model_segments} parser segments that cannot define "
+            "Rhapsody model elements."
+        )
+
+    if len(llm_segments) > request.max_llm_segments:
+        warnings.append(
+            "LLM extraction was limited to "
+            f"{request.max_llm_segments} of {len(llm_segments)} eligible "
+            "parser segments. Narrow the path or raise max_llm_segments if "
+            "more coverage is required."
+        )
+        llm_segments = llm_segments[: request.max_llm_segments]
+
+    segment_results = _extract_llm_segments(
+        llm_segments,
+        request,
+        model_extractor,
+        warnings,
+    )
 
     (
         macros,
@@ -589,3 +745,12 @@ def parse_segment_extraction_json(
         raise ValueError("LLM code extraction response must be a JSON object.")
     payload.setdefault("segment_id", segment_id)
     return CodeSegmentExtraction.model_validate(payload)
+
+
+def parse_batch_extraction_json(content: str) -> CodeBatchExtraction:
+    """Validate one LLM JSON response for a batch of syntax segments."""
+    payload = json.loads(content)
+    if not isinstance(payload, dict):
+        raise ValueError("LLM batch extraction response must be a JSON object.")
+    payload.setdefault("segment_results", [])
+    return CodeBatchExtraction.model_validate(payload)

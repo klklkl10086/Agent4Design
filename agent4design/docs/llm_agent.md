@@ -16,11 +16,16 @@ The adapter uses Chat Completions tool calls for broad provider compatibility.
 The rest of the project does not depend on this protocol and can gain another
 model adapter later.
 
-When the Agent calls `extract_code_path_model`, the service first segments C
-source with tree-sitter. The LLM adapter then reuses the same
-OpenAI-compatible client as an internal `CodeSegmentModelExtractor`: each
-syntax segment is sent to the model with its original source, line range, byte
-offsets, and local context, and the response must validate as strict JSON.
+For normal C/H modeling, the Agent uses a direct CODE-to-tool flow. If the user
+pastes CODE, the model generates `plan_agent4design_sync` JSON directly from
+the message. If the user provides a local C/H path, the Agent calls
+`read_code_path` to read CODE text. Long files are returned one syntax chunk at
+a time, so the model can call `plan_agent4design_sync` for one chunk, then ask
+`read_code_path` for the next chunk when `has_more=true`.
+
+`extract_code_path_model` and `plan_code_path_modeling` remain available as
+legacy parser/LLM extraction tools for diagnostics, but they are no longer the
+recommended default path.
 
 ## Configuration
 
@@ -79,6 +84,22 @@ One-shot mode:
 
 ```powershell
 python -m agent4design.adapters.llm --message "Inspect the selected Rhapsody target."
+```
+
+The CLI streams final assistant text as it arrives. When code extraction tools
+run, it also prints status lines for tool calls and individual source segments.
+
+For a local C/H path, the direct read step accepts bounded arguments such as:
+
+```json
+{
+  "path": "D:\\project_design\\GTMC_V57_CD\\sw.cmp.CD\\Source\\CD\\Project\\Code\\CD_AppMain.c",
+  "max_bytes": 120000,
+  "encoding": "auto",
+  "syntax_chunks": true,
+  "max_chunk_chars": 30000,
+  "chunk_index": 0
+}
 ```
 
 ## Safety Boundary

@@ -373,11 +373,39 @@ python -m agent4design.adapters.mcp `
 
 ### LLM Agent
 
-启动只读交互：
+启动交互式 Agent：
 
 ```powershell
 python -m agent4design.adapters.llm
 ```
+
+默认启动方式支持读操作、计划生成，以及在对话中使用明确授权语句触发一次写入。
+推荐先用这个模式完成日常同步流程：
+
+```text
+You> 建立连接
+Agent> ... initialize_rhapsody ...
+
+You> 根据 "D:\project\src\CD_AppMain.c" 这个路径的代码同步除了活动图之外的所有元素
+Agent> ... read_code_path / plan_agent4design_sync ...
+
+You> 批准执行
+Agent> ... execute_agent4design_sync ...
+```
+
+可识别的明确授权示例：
+
+```text
+批准执行
+同意执行
+授权执行
+确认执行
+允许执行
+允许写入
+刷新并执行同步不需要询问
+```
+
+如果回复中包含否定语义，例如“不批准执行”“不授权”“取消”，本地 adapter 不会放行写工具。
 
 单轮输入：
 
@@ -385,17 +413,48 @@ python -m agent4design.adapters.llm
 python -m agent4design.adapters.llm --message "Inspect the selected Rhapsody target."
 ```
 
-允许模型请求写入，但由终端人工确认：
+需要额外终端确认时，使用 `--allow-writes`：
 
 ```powershell
 python -m agent4design.adapters.llm --allow-writes
 ```
 
+在该模式下，如果最新用户消息已经明确授权，写入会直接放行；否则终端会显示写工具名称和 JSON 参数，并提示：
+
+```text
+Approve this Rhapsody write? [y/N]
+```
+
+输入 `y` 或 `yes` 才会继续执行写入。
+
+推荐完整流程：
+
+```text
+1. 打开 Rhapsody，并加载目标项目。
+2. 在 Rhapsody Browser 中选中要写入的 Class 或 Block。
+3. 启动 Agent：python -m agent4design.adapters.llm
+4. 输入“建立连接”或“初始化 Rhapsody”。
+5. 如果切换过 Rhapsody 选中目标，输入“刷新目标”。
+6. 输入代码路径同步请求，例如：
+   根据 "D:\project\src\CD_AppMain.c" 这个路径的代码同步除了活动图之外的所有元素
+7. 检查 Agent 输出的 plan_agent4design_sync 计划，确认 create / update / reject 项。
+8. 确认无误后输入“批准执行”。
+9. 以 execute_agent4design_sync 和 verify_rhapsody_model 的工具结果判断是否成功。
+10. 需要保存项目时，再明确要求保存并授权。
+```
+
+常见问题：
+
+- 如果一直报 `Human approval was not granted for this write operation.`，请确认使用的是当前代码，并且最新一条用户消息是明确授权语句。
+- 如果计划中的函数被拒绝，先检查 Rhapsody 当前目标是否为 `Class` 或 `Block`，然后执行 `select_rhapsody_target`。
+- 如果类型解析失败，先调用 `refresh_type_registry`，或在 Rhapsody 项目中补齐缺失类型。
+- 写入不会自动保存项目，保存需要单独调用 `save_rhapsody_project` 并授权。
+
 安全边界：
 
 - 模型看不到 `approved` schema。
 - 模型即使生成 `approved=true` 也会被本地 adapter 覆盖。
-- 没有人工确认时，写入工具会被拒绝。
+- 没有明确聊天授权或终端确认时，写入工具会被拒绝。
 - 写入成功与否以工具返回结果为准。
 
 ### LangGraph 工作流
@@ -427,7 +486,7 @@ Activity sync is not configured
 
 这是启动配置问题，不是可重试问题。配置 `.env` 后需要重启 HTTP、MCP 或 LLM Agent 服务。
 
-当前活动图导入仍是实验能力：生成的 XMI 会作为独立 Activity Package 导入，Function 与 Activity 的 ownership 关系仍需通过手工 XMI 导出继续验证。
+当前活动图导入仍是实验能力，但已按 Rhapsody 导出的正确 XMI 结构挂载到函数：执行前会在当前选中目标下解析同名 `Operation` 的 GUID，生成 `AD_函数名` 活动图，并在 XMI 中写入 `specification="OperationGUID"`。如果对应函数不在本次同步计划中、且当前模型中也找不到同名 Operation，计划阶段会拒绝该活动图。
 
 ### 项目结构
 
@@ -953,11 +1012,42 @@ running the server. Do not expose it directly to the public Internet.
 
 ### LLM Agent
 
-Interactive read-only mode:
+Start the interactive Agent:
 
 ```powershell
 python -m agent4design.adapters.llm
 ```
+
+The default mode supports read-only inspection, plan generation, and one write
+execution when the latest user message explicitly grants approval. A typical
+session looks like this:
+
+```text
+You> Connect to Rhapsody
+Agent> ... initialize_rhapsody ...
+
+You> Sync all non-activity elements from "D:\project\src\CD_AppMain.c"
+Agent> ... read_code_path / plan_agent4design_sync ...
+
+You> approved
+Agent> ... execute_agent4design_sync ...
+```
+
+Explicit approval examples:
+
+```text
+approved
+approve
+proceed
+execute
+yes
+批准执行
+授权执行
+允许写入
+```
+
+If the latest message contains a denial such as `cancel`, `reject`, `no`, or
+`不批准执行`, the local adapter will not approve the write tool.
 
 One-shot mode:
 
@@ -965,17 +1055,50 @@ One-shot mode:
 python -m agent4design.adapters.llm --message "Inspect the selected Rhapsody target."
 ```
 
-Allow write requests with terminal approval:
+Use `--allow-writes` when you want an extra terminal prompt:
 
 ```powershell
 python -m agent4design.adapters.llm --allow-writes
 ```
 
+With this flag, an explicit approval message still approves the write directly.
+If the latest message is not an approval, the terminal prints the write tool
+name and JSON arguments, then asks:
+
+```text
+Approve this Rhapsody write? [y/N]
+```
+
+Enter `y` or `yes` to continue.
+
+Recommended full workflow:
+
+```text
+1. Open Rhapsody and load the target project.
+2. Select the target Class or Block in the Rhapsody Browser.
+3. Start the Agent: python -m agent4design.adapters.llm
+4. Ask the Agent to connect to Rhapsody.
+5. If you change the selected Rhapsody target, ask the Agent to refresh it.
+6. Ask for a code-path sync, for example:
+   Sync all non-activity elements from "D:\project\src\CD_AppMain.c"
+7. Review the plan_agent4design_sync result, especially create / update / reject items.
+8. If the plan is correct, reply `approved` or `批准执行`.
+9. Trust execute_agent4design_sync and verify_rhapsody_model tool results, not prose alone.
+10. Save the project only after a separate save request and approval.
+```
+
+Troubleshooting:
+
+- If `Human approval was not granted for this write operation.` repeats, make sure you are running the current code and that the latest user message is an explicit approval.
+- If functions are rejected, make sure the selected Rhapsody target is a `Class` or `Block`, then refresh the target.
+- If type resolution fails, call `refresh_type_registry` or add the missing type definitions to the Rhapsody project.
+- Writes do not save the project automatically; saving requires `save_rhapsody_project` and approval.
+
 Safety boundary:
 
 - The model-visible schema does not include `approved`.
 - Model-generated `approved=true` is overwritten locally.
-- Writes are rejected unless the local approval handler approves them.
+- Writes are rejected unless the latest user message or terminal prompt approves them.
 - Success must be based on tool results.
 
 ### LangGraph Workflow
@@ -1011,9 +1134,12 @@ Activity sync is not configured
 This is a startup configuration issue, not a retryable request issue. Edit
 `.env` and restart the HTTP, MCP, or LLM Agent service.
 
-Activity import is still experimental. Generated XMI is imported as a
-standalone Activity Package, and Function-to-Activity ownership mapping still
-needs confirmation through manual XMI export experiments.
+Activity import is still experimental, but generated XMI now follows the
+Rhapsody-exported function binding structure. Before execution, Agent4Design
+resolves the matching `Operation` GUID under the selected target, generates an
+`AD_functionName` Activity, and writes `specification="OperationGUID"` into the
+XMI. If the function is neither part of the current sync request nor present as
+an existing Operation, the plan rejects that activity.
 
 ### Project Structure
 

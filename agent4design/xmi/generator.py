@@ -40,22 +40,52 @@ def _indent_xml(element: ET.Element, level: int = 0) -> None:
         element.tail = indentation
 
 
+def _new_xmi_id(label: str = "") -> str:
+    suffix = f"_{sanitize_identifier(label)}" if label else ""
+    return f"GUID+{uuid.uuid4()}{suffix}"
+
+
 def _build_xmi_node_ids(graph: ActivityGraph) -> Dict[str, str]:
-    """Build XMI ids and reject collisions introduced by sanitization."""
+    """Build Rhapsody-style XMI ids and reject source node id collisions."""
     result: Dict[str, str] = {}
-    used_ids: Set[str] = set()
+    seen_source_ids: Set[str] = set()
 
     for node in graph.nodes:
-        xmi_id = f"Node_{sanitize_identifier(node.id)}"
-        if xmi_id in used_ids:
-            raise ValueError(f"Node ids collide after sanitization: {node.id}")
-        result[node.id] = xmi_id
-        used_ids.add(xmi_id)
+        if node.id in seen_source_ids:
+            raise ValueError(f"Duplicate node id: {node.id}")
+        result[node.id] = (
+            _new_xmi_id("InitialNode")
+            if node.type == "Initial"
+            else _new_xmi_id()
+        )
+        seen_source_ids.add(node.id)
 
     return result
 
 
-def _add_activity_node(activity: ET.Element, node_id: str, node_type: str, name: str, description: str) -> None:
+def _edge_ids_by_node(
+    graph: ActivityGraph,
+    edge_ids: Dict[int, str],
+) -> tuple[Dict[str, list[str]], Dict[str, list[str]]]:
+    incoming: Dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+    outgoing: Dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+    for index, edge in enumerate(graph.edges):
+        outgoing[edge.source].append(edge_ids[index])
+        incoming[edge.target].append(edge_ids[index])
+    return incoming, outgoing
+
+
+def _add_activity_node(
+    activity: ET.Element,
+    *,
+    activity_id: str,
+    node_id: str,
+    node_type: str,
+    name: str,
+    description: str,
+    incoming: list[str],
+    outgoing: list[str],
+) -> None:
     xmi_type_by_node_type = {
         "Action": "uml:OpaqueAction",
         "Decision": "uml:DecisionNode",
@@ -63,61 +93,126 @@ def _add_activity_node(activity: ET.Element, node_id: str, node_type: str, name:
         "Initial": "uml:InitialNode",
         "Final": "uml:ActivityFinalNode",
     }
+    attributes = {
+        _xmi("type"): xmi_type_by_node_type[node_type],
+        _xmi("id"): node_id,
+        "activity": activity_id,
+    }
+    if name:
+        attributes["name"] = name
+    if incoming:
+        attributes["incoming"] = " ".join(incoming)
+    if outgoing:
+        attributes["outgoing"] = " ".join(outgoing)
+
     node = ET.SubElement(
         activity,
         "node",
+        attributes,
+    )
+    if node_type == "Action" and description:
+        ET.SubElement(node, "body").text = description
+
+
+def _create_root_container(
+    *,
+    function_name: str,
+    package_name: str,
+    container_xmi_id: str,
+    container_name: str,
+    container_meta_class: str,
+) -> tuple[ET.Element, ET.Element, str]:
+    root = ET.Element(_xmi("XMI"), {_xmi("version"): "2.1"})
+    if container_xmi_id and container_meta_class in ("Class", "Block"):
+        container = ET.SubElement(
+            root,
+            _uml("Class"),
+            {
+                _xmi("id"): container_xmi_id,
+                "name": sanitize_identifier(container_name or package_name or function_name),
+            },
+        )
+        return root, container, "ownedBehavior"
+
+    container = ET.SubElement(
+        root,
+        _uml("Package"),
         {
-            _xmi("type"): xmi_type_by_node_type[node_type],
-            _xmi("id"): node_id,
-            "name": name,
+            _xmi("id"): _new_xmi_id("Package"),
+            "name": sanitize_identifier(package_name) if package_name else f"{function_name}_Import",
         },
     )
-    if node_type == "Action":
-        ET.SubElement(node, "body").text = description
+    return root, container, "packagedElement"
 
 
 def generate_activity_xmi(
     function_spec: FunctionSpec,
     graph: ActivityGraph,
     output_dir: Union[str, Path] = "xmi_read",
+    *,
+    operation_xmi_id: str = "",
+    package_name: str = "",
+    container_xmi_id: str = "",
+    container_name: str = "",
+    container_meta_class: str = "",
 ) -> str:
     """Generate an activity XMI file and return its absolute path."""
     validate_activity_graph(graph)
 
     function_name = sanitize_identifier(function_spec.name)
     node_ids = _build_xmi_node_ids(graph)
-    unique_suffix = uuid.uuid4().hex
+    edge_ids = {index: _new_xmi_id() for index, _ in enumerate(graph.edges)}
+    incoming_by_node, outgoing_by_node = _edge_ids_by_node(graph, edge_ids)
+    activity_id = _new_xmi_id()
+    activity_name = f"activity_{function_name}"
 
-    root = ET.Element(_xmi("XMI"), {_xmi("version"): "2.1"})
-    package = ET.SubElement(
-        root,
-        _uml("Package"),
-        {
-            _xmi("id"): f"Package_{unique_suffix}",
-            "name": function_name,
-        },
+    root, container, activity_tag = _create_root_container(
+        function_name=function_name,
+        package_name=package_name,
+        container_xmi_id=container_xmi_id,
+        container_name=container_name,
+        container_meta_class=container_meta_class,
     )
+
+    activity_attributes = {
+        _xmi("type"): "uml:Activity",
+        _xmi("id"): activity_id,
+        "name": activity_name,
+    }
+    if operation_xmi_id and activity_tag == "ownedBehavior":
+        activity_attributes["specification"] = operation_xmi_id
+
     activity = ET.SubElement(
-        package,
-        "packagedElement",
+        container,
+        activity_tag,
+        activity_attributes,
+    )
+    constraint_id = _new_xmi_id("Container")
+    ET.SubElement(
+        activity,
+        "ownedRule",
         {
-            _xmi("type"): "uml:Activity",
-            _xmi("id"): f"Activity_{unique_suffix}",
-            "name": f"activity_{function_name}",
+            _xmi("type"): "uml:Constraint",
+            _xmi("id"): constraint_id,
+            "name": activity_name if operation_xmi_id else "ActivityDiagram",
+            "context": activity_id,
         },
     )
 
     for node in graph.nodes:
         _add_activity_node(
             activity,
-            node_ids[node.id],
-            node.type,
-            node.label or f"{node.type}_{sanitize_identifier(node.id)}",
-            node.description,
+            activity_id=activity_id,
+            node_id=node_ids[node.id],
+            node_type=node.type,
+            name=node.label or f"{node.type}_{sanitize_identifier(node.id)}",
+            description=node.description,
+            incoming=incoming_by_node[node.id],
+            outgoing=outgoing_by_node[node.id],
         )
 
     for index, edge in enumerate(graph.edges):
-        edge_id = f"Edge_{index}_{uuid.uuid4().hex[:8]}"
+        edge_id = edge_ids[index]
         edge_element = ET.SubElement(
             activity,
             "edge",
@@ -127,17 +222,28 @@ def generate_activity_xmi(
                 "name": str(index),
                 "source": node_ids[edge.source],
                 "target": node_ids[edge.target],
+                "activity": activity_id,
             },
         )
         if edge.guard:
+            guard_value = edge.guard.strip()
+            guard_type = (
+                "uml:LiteralBoolean"
+                if guard_value.lower() in ("true", "false")
+                else "uml:LiteralString"
+            )
+            guard_attributes = {
+                _xmi("type"): guard_type,
+                _xmi("id"): f"{edge_id}_guard",
+            }
+            if guard_type == "uml:LiteralString":
+                guard_attributes["value"] = edge.guard
+            else:
+                guard_attributes["value"] = guard_value.lower()
             ET.SubElement(
                 edge_element,
                 "guard",
-                {
-                    _xmi("type"): "uml:LiteralString",
-                    _xmi("id"): f"{edge_id}_guard",
-                    "value": edge.guard,
-                },
+                guard_attributes,
             )
         ET.SubElement(
             edge_element,

@@ -122,6 +122,8 @@ class ActivityPlanItem(StrictModel):
 
     function_name: str
     activity_name: str
+    mounted_to_operation: bool = False
+    operation_path: str = ""
     success: bool
     experimental: bool = True
     error: str = ""
@@ -459,7 +461,7 @@ class Agent4DesignService:
         return self.model_sync_service.sync(request)
 
     def sync_activity(self, request: ActivitySyncRequest) -> ActivitySyncResult:
-        """Generate and import one standalone activity XMI artifact."""
+        """Generate and import one function-mounted activity XMI artifact."""
         if self.activity_sync_service is None:
             raise RuntimeError(
                 "Activity sync is not configured. This is a service startup "
@@ -469,9 +471,19 @@ class Agent4DesignService:
                 "AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true explicitly, or construct "
                 "the service with Agent4DesignService.with_xmi_toolkit(...)."
             )
+        operation_reference = self.repository.resolve_operation_reference(
+            request.function_spec.name
+        )
         return self.activity_sync_service.sync(
             request.function_spec,
             request.graph,
+            operation_xmi_id=operation_reference.xmi_id,
+            operation_path=operation_reference.path,
+            package_name=self.context.target_name,
+            container_xmi_id=operation_reference.container_xmi_id,
+            container_name=operation_reference.container_name,
+            container_meta_class=operation_reference.container_meta_class,
+            container_path=operation_reference.container_path,
         )
 
     def sync(self, request: AgentSyncRequest) -> AgentSyncResult:
@@ -600,17 +612,40 @@ class Agent4DesignService:
         """Build a read-only approval plan for semantic and activity writes."""
         model_plan = self.sync_plan_service.plan(request.model)
         activities = []
+        planned_function_names = {
+            sanitize_identifier(function.name)
+            for function in request.model.functions
+        }
         for activity in request.activities:
-            activity_name = f"activity_{sanitize_identifier(activity.function_spec.name)}"
+            function_name = sanitize_identifier(activity.function_spec.name)
+            activity_name = f"activity_{function_name}"
             try:
                 from agent4design.domain.validators import validate_activity_graph
 
                 validate_activity_graph(activity.graph)
+                operation_path = ""
+                mounted_to_operation = False
+                mount_error = ""
+                if function_name in planned_function_names:
+                    mounted_to_operation = True
+                else:
+                    try:
+                        operation_reference = self.repository.resolve_operation_reference(
+                            activity.function_spec.name
+                        )
+                        operation_path = operation_reference.path
+                        mounted_to_operation = True
+                    except Exception as exc:
+                        mounted_to_operation = False
+                        mount_error = str(exc)
                 activities.append(
                     ActivityPlanItem(
                         function_name=activity.function_spec.name,
                         activity_name=activity_name,
-                        success=True,
+                        mounted_to_operation=mounted_to_operation,
+                        operation_path=operation_path,
+                        success=mounted_to_operation,
+                        error=mount_error,
                     )
                 )
             except Exception as exc:
@@ -649,9 +684,9 @@ class Agent4DesignService:
         verification = None
         if request.verify_after_sync and sync_result.success:
             imported_activities = [
-                f"activity_{sanitize_identifier(item.function_name)}"
+                item.result.activity_name
                 for item in sync_result.activities
-                if item.success
+                if item.success and item.result is not None
             ]
             verification = self.verify(
                 VerificationRequest(

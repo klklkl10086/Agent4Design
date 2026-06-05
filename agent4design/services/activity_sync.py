@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from agent4design.domain.models import ActivityGraph, FunctionSpec
 from agent4design.domain.validators import validate_activity_graph
+from agent4design.tools.tool import sanitize_identifier
 from agent4design.xmi.generator import generate_activity_xmi
 from agent4design.xmi.importer import XMIImportResult, import_xmi_file
 
@@ -15,6 +16,11 @@ class ActivitySyncResult(BaseModel):
     """Result of generating and importing one standalone activity."""
 
     function_name: str
+    activity_name: str
+    operation_path: str = ""
+    operation_xmi_id: str = ""
+    container_path: str = ""
+    container_xmi_id: str = ""
     xmi_path: str
     import_result: XMIImportResult
 
@@ -38,10 +44,27 @@ class ActivitySyncService:
         self,
         function_spec: FunctionSpec,
         graph: ActivityGraph,
+        *,
+        operation_xmi_id: str = "",
+        operation_path: str = "",
+        package_name: str = "",
+        container_xmi_id: str = "",
+        container_name: str = "",
+        container_meta_class: str = "",
+        container_path: str = "",
     ) -> ActivitySyncResult:
-        """Validate, generate, and import a standalone UML Activity package."""
+        """Validate, generate, and import a UML Activity package."""
         validate_activity_graph(graph)
-        xmi_path = generate_activity_xmi(function_spec, graph, self.output_dir)
+        xmi_path = generate_activity_xmi(
+            function_spec,
+            graph,
+            self.output_dir,
+            operation_xmi_id=operation_xmi_id,
+            package_name=package_name,
+            container_xmi_id=container_xmi_id,
+            container_name=container_name,
+            container_meta_class=container_meta_class,
+        )
         import_result = import_xmi_file(
             xmi_path,
             self.toolkit_bat,
@@ -50,6 +73,11 @@ class ActivitySyncService:
         )
         return ActivitySyncResult(
             function_name=function_spec.name,
+            activity_name=f"activity_{sanitize_identifier(function_spec.name)}",
+            operation_path=operation_path,
+            operation_xmi_id=operation_xmi_id,
+            container_path=container_path,
+            container_xmi_id=container_xmi_id,
             xmi_path=xmi_path,
             import_result=import_result,
         )

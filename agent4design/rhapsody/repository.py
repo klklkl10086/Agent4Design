@@ -52,6 +52,20 @@ class TypeResolutionSummary(StrictModel):
     message: str = ""
 
 
+class OperationReference(StrictModel):
+    """XMI-ready reference to an existing Rhapsody Operation."""
+
+    name: str
+    path: str = ""
+    guid: str = ""
+    xmi_id: str = ""
+    container_name: str = ""
+    container_meta_class: str = ""
+    container_path: str = ""
+    container_guid: str = ""
+    container_xmi_id: str = ""
+
+
 BUILTIN_C_TYPES = {
     "_Bool",
     "char",
@@ -122,6 +136,27 @@ def _element_summary(element: Any, created: bool) -> ElementSummary:
         path=_element_path(element),
         created=created,
     )
+
+
+def _element_guid(element: Any) -> str:
+    try:
+        return str(getattr(element, "GUID", "") or "")
+    except Exception:
+        return ""
+
+
+def _guid_to_xmi_id(guid: str) -> str:
+    value = (guid or "").strip()
+    if not value:
+        return ""
+    if value.startswith("GUID "):
+        value = value[5:].strip()
+    if value.startswith("GUID+"):
+        value = value[5:].strip()
+    value = value.strip("{}")
+    if value.endswith("_0"):
+        value = value[:-2]
+    return f"GUID+{value}"
 
 
 def _is_writable_container(element: Any) -> bool:
@@ -338,6 +373,39 @@ class RhapsodyRepository:
                     f"expected {meta_class}"
                 )
             return None
+
+        return run_on_com(_impl)
+
+    def resolve_operation_reference(self, name: str) -> OperationReference:
+        """Return the selected target's Operation GUID in Rhapsody XMI form."""
+        def _impl() -> OperationReference:
+            target = self.context.require_target_in_thread()
+            operation = _find_child(target, "Operation", sanitize_identifier(name))
+            if operation is None:
+                raise LookupError(
+                    f"Operation '{sanitize_identifier(name)}' was not found "
+                    "under the selected Rhapsody target."
+                )
+            guid = _element_guid(operation)
+            xmi_id = _guid_to_xmi_id(guid)
+            if not xmi_id:
+                raise RuntimeError(
+                    f"Operation '{sanitize_identifier(name)}' does not expose a GUID."
+                )
+            container = getattr(operation, "owner", None) or target
+            container_guid = _element_guid(container)
+            container_xmi_id = _guid_to_xmi_id(container_guid)
+            return OperationReference(
+                name=getattr(operation, "name", sanitize_identifier(name)),
+                path=_element_path(operation),
+                guid=guid,
+                xmi_id=xmi_id,
+                container_name=getattr(container, "name", ""),
+                container_meta_class=getattr(container, "metaClass", ""),
+                container_path=_element_path(container),
+                container_guid=container_guid,
+                container_xmi_id=container_xmi_id,
+            )
 
         return run_on_com(_impl)
 

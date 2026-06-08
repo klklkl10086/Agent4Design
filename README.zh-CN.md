@@ -13,6 +13,7 @@ XMI Toolkit 生成并导入为独立 XMI 包。
 
 - Windows，并且已经安装 IBM Rhapsody。
 - IBM Rhapsody 必须在运行 Agent4Design 的同一台机器、同一个桌面会话中打开。
+- 必须确定IBM Rhapsody的COM (Component Object Model) 程序标识符是 `Rhapsody2.Application`，如果不是，需要更改[context.py](.agent4design.rhapsody.context.py)
 - Python 3.10 或更新版本。
 - 使用 Rhapsody COM 写入时，需要安装 `rhapsody` extra，其中包含 `pywin32`。
 - 读取和分段 C/H 代码时，需要安装 `parser` extra。
@@ -74,7 +75,7 @@ release/
 ```text
 当前工作目录 .env
 项目根目录 .env
-agent4design/.env
+agent4design/.env #best
 ```
 
 最小 LLM 配置：
@@ -89,7 +90,7 @@ AGENT4DESIGN_LLM_BASE_URL=https://你的OpenAI兼容接口
 
 ```dotenv
 AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
-AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat
+AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat 
 AGENT4DESIGN_XMI_OUTPUT_DIR=xmi_read
 AGENT4DESIGN_XMI_LOG_DIR=xmi_import_logs
 AGENT4DESIGN_XMI_TIMEOUT=600

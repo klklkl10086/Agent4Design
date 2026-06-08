@@ -55,6 +55,43 @@ class VariableSpec(StrictModel):
     raw_declaration: str = Field("", description="Original C declaration.")
 
 
+TypeDefinitionKind = Literal["struct", "union", "enum", "typedef"]
+
+
+class TypeMemberSpec(StrictModel):
+    """A field/member owned by a struct or union Type."""
+
+    name: str = Field(..., min_length=1, description="Member or attribute name.")
+    type_info: CTypeInfo
+
+
+class EnumLiteralSpec(StrictModel):
+    """An enumeration literal and its optional numeric/string value."""
+
+    name: str = Field(..., min_length=1, description="Enumeration literal name.")
+    value: str | int = Field("", description="Literal value as shown in Rhapsody.")
+
+
+class TypeDefinitionSpec(StrictModel):
+    """A Rhapsody Type created through the C type GUI flow."""
+
+    name: str = Field(..., min_length=1, description="Type name.")
+    kind: TypeDefinitionKind = Field(..., description="struct, union, enum, or typedef.")
+    attributes: List[TypeMemberSpec] = Field(
+        default_factory=list,
+        description="Struct/union members written to the Attributes tab.",
+    )
+    literals: List[EnumLiteralSpec] = Field(
+        default_factory=list,
+        description="Enum members written to the Literals tab.",
+    )
+    basic_type: Optional[CTypeInfo] = Field(
+        None,
+        description="Typedef Details > Basic Type.",
+    )
+    multiplicity: str = Field("", description="Typedef Details > Multiplicity.")
+
+
 ActivityNodeType = Literal["Initial", "Action", "Decision", "Merge", "Final"]
 
 

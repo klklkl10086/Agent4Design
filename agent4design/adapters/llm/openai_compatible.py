@@ -37,10 +37,16 @@ DEFAULT_SYSTEM_PROMPT = """\
 You are Agent4Design, an IBM Rhapsody modeling assistant.
 Use tools to inspect the active project and build a read-only synchronization
 plan before requesting changes. Never claim that a write succeeded unless the
-tool result reports success. Writes require approval from the human operator;
-you cannot grant approval yourself. Activity XMI import is experimental until
-Function ownership mapping is verified manually. Keep responses concise and
-surface rejected types or verification failures clearly.
+tool result reports success. Write tools are available only when the CLI was
+started with --allow-writes; otherwise they are blocked locally. Activity XMI
+import creates standalone activity packages. Keep responses concise and surface
+rejected types or verification failures clearly.
+If a tool status says "Write tool approved by --allow-writes" and the tool then
+fails, do not tell the user to restart with --allow-writes. Report the actual
+tool error as a COM/model-target/schema problem. COM errors such as
+E_NOINTERFACE or -2147221498 usually mean the selected Rhapsody element does
+not support the requested interface or the model element was targeted at the
+wrong container.
 For C/H code, use the direct CODE-to-tool flow:
 1. If the user pastes CODE, read it from the message and generate the JSON
    arguments for plan_agent4design_sync directly.
@@ -53,10 +59,13 @@ For C/H code, use the direct CODE-to-tool flow:
    continue. Do not wait to read every chunk before calling tools.
 4. Do not call extract_code_path_model or plan_code_path_modeling unless the
    user explicitly asks to use the legacy extractor.
-5. Extract only model elements needed by the sync tool: macros, variables, and
-   function signatures. Do not derive activity graphs from function bodies
-   unless the user explicitly asks for activity diagrams.
-Use execute_agent4design_sync only after human approval is available.
+5. Extract only model elements needed by the sync tool: types, macros,
+   variables, and function signatures. For types, fill model.types:
+   struct/union members go in attributes with member name and type_info; enum
+   members go in literals with name and value; typedef uses basic_type and
+   multiplicity. Do not derive activity graphs from function bodies unless the
+   user explicitly asks for activity diagrams.
+Use execute_agent4design_sync only when the current CLI session allows writes.
 """
 
 DEFAULT_VIO_HEADERS = {
@@ -558,8 +567,8 @@ class OpenAICompatibleAgent:
                         name=name,
                         success=False,
                         error=(
-                            "Human approval was not granted for this write "
-                            "operation."
+                            "Write tools are disabled for this CLI session. "
+                            "Restart with --allow-writes to execute writes."
                         ),
                     ),
                 )
@@ -567,11 +576,23 @@ class OpenAICompatibleAgent:
             call_arguments["approved"] = True
             human_approved = True
 
+        result = self.service.call(name, call_arguments)
+        if human_approved and not result.success:
+            result = result.model_copy(
+                update={
+                    "error": (
+                        "Write tool was approved by --allow-writes. "
+                        "This is not a CLI write-permission failure. "
+                        f"The modeling/COM operation failed: {result.error}"
+                    )
+                }
+            )
+
         return ToolExecutionRecord(
             name=name,
             arguments=arguments,
             human_approved=human_approved,
-            result=self.service.call(name, call_arguments),
+            result=result,
         )
 
     def _set_code_extractor_status_handler(

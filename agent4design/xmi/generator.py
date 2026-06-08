@@ -12,9 +12,11 @@ from agent4design.tools.tool import sanitize_identifier
 
 XMI_NS = "http://schema.omg.org/spec/XMI/2.1"
 UML_NS = "http://schema.omg.org/spec/UML/2.1"
+RHP_NS = "http://RhapsodyStandardModel/schemas/RhapsodyProfile/_FZBiUGCaEfGfBrKpKCTvvw/0"
 
 ET.register_namespace("xmi", XMI_NS)
 ET.register_namespace("uml", UML_NS)
+ET.register_namespace("RhapsodyProfile", RHP_NS)
 
 
 def _xmi(attribute: str) -> str:
@@ -23,6 +25,10 @@ def _xmi(attribute: str) -> str:
 
 def _uml(element: str) -> str:
     return f"{{{UML_NS}}}{element}"
+
+
+def _rhp(element: str) -> str:
+    return f"{{{RHP_NS}}}{element}"
 
 
 def _indent_xml(element: ET.Element, level: int = 0) -> None:
@@ -43,6 +49,13 @@ def _indent_xml(element: ET.Element, level: int = 0) -> None:
 def _new_xmi_id(label: str = "") -> str:
     suffix = f"_{sanitize_identifier(label)}" if label else ""
     return f"GUID+{uuid.uuid4()}{suffix}"
+
+
+def _rhapsody_guid(xmi_id: str) -> str:
+    value = (xmi_id or "").strip()
+    if value.startswith("GUID+"):
+        return f"GUID {value[5:]}"
+    return value.replace("GUID+", "GUID ", 1)
 
 
 def _build_xmi_node_ids(graph: ActivityGraph) -> Dict[str, str]:
@@ -114,26 +127,27 @@ def _add_activity_node(
         ET.SubElement(node, "body").text = description
 
 
+def _add_action_description(root: ET.Element, *, action_id: str, description: str) -> None:
+    if not description:
+        return
+    ET.SubElement(
+        root,
+        _rhp("RhpModelElement"),
+        {
+            _xmi("id"): f"{action_id}_Stereotype_RhapsodyProfile_RhpModelElement",
+            "guid": _rhapsody_guid(action_id),
+            "description": description,
+            "base_OpaqueAction": action_id,
+        },
+    )
+
+
 def _create_root_container(
     *,
     function_name: str,
     package_name: str,
-    container_xmi_id: str,
-    container_name: str,
-    container_meta_class: str,
-) -> tuple[ET.Element, ET.Element, str]:
+) -> tuple[ET.Element, ET.Element]:
     root = ET.Element(_xmi("XMI"), {_xmi("version"): "2.1"})
-    if container_xmi_id and container_meta_class in ("Class", "Block"):
-        container = ET.SubElement(
-            root,
-            _uml("Class"),
-            {
-                _xmi("id"): container_xmi_id,
-                "name": sanitize_identifier(container_name or package_name or function_name),
-            },
-        )
-        return root, container, "ownedBehavior"
-
     container = ET.SubElement(
         root,
         _uml("Package"),
@@ -142,7 +156,7 @@ def _create_root_container(
             "name": sanitize_identifier(package_name) if package_name else f"{function_name}_Import",
         },
     )
-    return root, container, "packagedElement"
+    return root, container
 
 
 def generate_activity_xmi(
@@ -164,27 +178,21 @@ def generate_activity_xmi(
     edge_ids = {index: _new_xmi_id() for index, _ in enumerate(graph.edges)}
     incoming_by_node, outgoing_by_node = _edge_ids_by_node(graph, edge_ids)
     activity_id = _new_xmi_id()
-    activity_name = f"activity_{function_name}"
 
-    root, container, activity_tag = _create_root_container(
+    root, container = _create_root_container(
         function_name=function_name,
         package_name=package_name,
-        container_xmi_id=container_xmi_id,
-        container_name=container_name,
-        container_meta_class=container_meta_class,
     )
 
     activity_attributes = {
         _xmi("type"): "uml:Activity",
         _xmi("id"): activity_id,
-        "name": activity_name,
+        "name": f"activity_{function_name}",
     }
-    if operation_xmi_id and activity_tag == "ownedBehavior":
-        activity_attributes["specification"] = operation_xmi_id
 
     activity = ET.SubElement(
         container,
-        activity_tag,
+        "packagedElement",
         activity_attributes,
     )
     constraint_id = _new_xmi_id("Container")
@@ -194,7 +202,7 @@ def generate_activity_xmi(
         {
             _xmi("type"): "uml:Constraint",
             _xmi("id"): constraint_id,
-            "name": activity_name if operation_xmi_id else "ActivityDiagram",
+            "name": "ActivityDiagram",
             "context": activity_id,
         },
     )
@@ -210,6 +218,12 @@ def generate_activity_xmi(
             incoming=incoming_by_node[node.id],
             outgoing=outgoing_by_node[node.id],
         )
+        if node.type == "Action":
+            _add_action_description(
+                root,
+                action_id=node_ids[node.id],
+                description=node.description,
+            )
 
     for index, edge in enumerate(graph.edges):
         edge_id = edge_ids[index]

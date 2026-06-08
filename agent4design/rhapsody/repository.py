@@ -9,10 +9,14 @@ from win32com.client import CastTo
 from agent4design.domain.models import (
     CTypeInfo,
     ElementSummary,
+    EnumLiteralSpec,
     FunctionArgument,
     FunctionSpec,
     MacroSpec,
     StrictModel,
+    TypeDefinitionKind,
+    TypeDefinitionSpec,
+    TypeMemberSpec,
     VariableSpec,
 )
 from agent4design.rhapsody.com_runtime import run_on_com
@@ -33,7 +37,7 @@ class UnsupportedTargetError(RuntimeError):
     """Raised when the selected Rhapsody target cannot accept a write."""
 
 
-SyncElementKind = Literal["macro", "variable", "function"]
+SyncElementKind = Literal["type", "macro", "variable", "function"]
 TypeResolutionKind = Literal[
     "void",
     "reuse",
@@ -107,9 +111,11 @@ INTERFACE_BY_META_CLASS = {
     "Function": "IRPOperation",
     "Argument": "IRPArgument",
     "Type": "IRPType",
+    "EnumerationLiteral": "IRPEnumerationLiteral",
 }
 
-FUNCTION_TARGET_META_CLASSES = ("Class", "Block")
+CLASSIFIER_TARGET_META_CLASSES = ("Class", "Block")
+FUNCTION_TARGET_META_CLASSES = CLASSIFIER_TARGET_META_CLASSES
 
 
 def _cast_to_specific_interface(element: Any, meta_class: str) -> Any:
@@ -201,6 +207,62 @@ def _find_named_child(target: Any, name: str) -> Any | None:
     return None
 
 
+def _unique_elements(elements: list[Any]) -> list[Any]:
+    unique: list[Any] = []
+    seen: set[str] = set()
+    for element in elements:
+        key = _element_guid(element) or _element_path(element) or getattr(element, "name", "")
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(element)
+    return unique
+
+
+def _find_nested_classifiers(target: Any) -> list[Any]:
+    candidates: list[Any] = []
+    for meta_class in CLASSIFIER_TARGET_META_CLASSES:
+        try:
+            collection = target.getNestedElementsByMetaClass(meta_class, 1)
+        except Exception:
+            collection = None
+        if collection is None:
+            continue
+        for index in range(1, collection.Count + 1):
+            candidates.append(
+                _cast_to_specific_interface(collection.Item(index), meta_class)
+            )
+    return _unique_elements(candidates)
+
+
+def _resolve_classifier_target(target: Any, purpose: str) -> Any:
+    target_meta_class = getattr(target, "metaClass", "")
+    if target_meta_class in CLASSIFIER_TARGET_META_CLASSES:
+        return target
+
+    candidates = _find_nested_classifiers(target)
+    if len(candidates) == 1:
+        return candidates[0]
+
+    target_path = _element_path(target)
+    if not candidates:
+        raise UnsupportedTargetError(
+            f"{purpose} synchronization requires a Class or Block target. "
+            f"The current target is {target_meta_class or 'Unknown'} at "
+            f"'{target_path}'. Select the owning Class/Block in Rhapsody, "
+            "or select a container with exactly one nested Class/Block, then run "
+            "select_rhapsody_target."
+        )
+
+    candidate_paths = ", ".join(_element_path(item) for item in candidates[:5])
+    extra = "" if len(candidates) <= 5 else f", ... ({len(candidates)} total)"
+    raise UnsupportedTargetError(
+        f"{purpose} synchronization found multiple nested Class/Block targets under "
+        f"{target_meta_class or 'Unknown'} '{target_path}'. Select the exact "
+        f"Class/Block first. Candidates: {candidate_paths}{extra}"
+    )
+
+
 def _get_or_create_element(target: Any, meta_class: str, name: str) -> tuple[Any, bool]:
     existing = _find_child(target, meta_class, name)
     if existing is not None:
@@ -240,6 +302,8 @@ def _get_or_create_argument(operation: Any, argument: FunctionArgument) -> Any:
 def get_sync_meta_class(target: Any, kind: SyncElementKind) -> str:
     """Select the Rhapsody metaclass used for one semantic C element."""
     target_meta_class = getattr(target, "metaClass", "")
+    if kind == "type":
+        return "Type"
     if kind == "function":
         if target_meta_class not in FUNCTION_TARGET_META_CLASSES:
             raise UnsupportedTargetError(
@@ -259,6 +323,53 @@ def _set_if_supported(element: Any, attribute: str, value: Any) -> None:
         setattr(element, attribute, value)
     except Exception:
         pass
+
+
+def _type_declaration_text(type_info: CTypeInfo) -> str:
+    base_type = type_info.base_type.strip()
+    return f"{'const ' if type_info.is_const else ''}{base_type} {type_info.pointer_modifier}".strip()
+
+
+def _collection_item_by_name(collection: Any, name: str) -> Any | None:
+    if collection is None:
+        return None
+    for index in range(1, collection.Count + 1):
+        item = collection.Item(index)
+        if getattr(item, "name", "") == name:
+            return item
+    return None
+
+
+def _type_kind_candidates(kind: TypeDefinitionKind) -> tuple[str, ...]:
+    return {
+        "struct": ("Struct", "Structure"),
+        "union": ("Union",),
+        "enum": ("Enumeration", "Enum"),
+        "typedef": ("Typedef", "TypeDef"),
+    }[kind]
+
+
+def _type_kind_matches(type_element: Any, kind: TypeDefinitionKind) -> bool | None:
+    method_name = {
+        "struct": "isKindStruct",
+        "union": "isKindUnion",
+        "enum": "isKindEnumeration",
+        "typedef": "isKindTypedef",
+    }[kind]
+    try:
+        return bool(getattr(type_element, method_name)())
+    except Exception:
+        return None
+
+
+def _set_type_kind(type_element: Any, kind: TypeDefinitionKind) -> None:
+    candidates = _type_kind_candidates(kind)
+    for candidate in candidates:
+        _set_if_supported(type_element, "kind", candidate)
+        matches = _type_kind_matches(type_element, kind)
+        if matches is not False:
+            return
+    _set_if_supported(type_element, "kind", candidates[0])
 
 
 class RhapsodyRepository:
@@ -296,7 +407,10 @@ class RhapsodyRepository:
                 "or construct RhapsodyRepository(create_placeholder_type=True)."
             )
 
-        target = self.context.require_target_in_thread()
+        target = _resolve_classifier_target(
+            self.context.require_target_in_thread(),
+            "Placeholder type",
+        )
         classifier, created = _get_or_create_element(target, "Type", base_type)
         _set_if_supported(classifier, "kind", "Language")
         _set_if_supported(classifier, "declaration", base_type)
@@ -359,6 +473,8 @@ class RhapsodyRepository:
         """Locate the direct target element without modifying the model."""
         def _impl() -> ElementSummary | None:
             target = self.context.require_target_in_thread()
+            if kind == "type":
+                target = _resolve_classifier_target(target, "Type")
             meta_class = get_sync_meta_class(target, kind)
             sanitized_name = sanitize_identifier(name)
             existing = _find_child(target, meta_class, sanitized_name)
@@ -419,7 +535,7 @@ class RhapsodyRepository:
     ) -> None:
         classifier, _ = self._find_or_create_type_in_thread(type_info)
         base_type = type_info.base_type.strip()
-        textual_type = f"{'const ' if type_info.is_const else ''}{base_type} {type_info.pointer_modifier}".strip()
+        textual_type = _type_declaration_text(type_info)
 
         if classifier is not None:
             classifier_meta = getattr(classifier, "metaClass", "")
@@ -457,6 +573,130 @@ class RhapsodyRepository:
             element.setReturnTypeDeclaration(textual_type)
         else:
             element.setTypeDeclaration(textual_type)
+
+    def _get_or_create_type_attribute_in_thread(
+        self,
+        type_element: Any,
+        member: TypeMemberSpec,
+    ) -> tuple[Any, bool]:
+        name = sanitize_identifier(member.name)
+        try:
+            existing = type_element.findAttribute(name)
+            if existing is not None:
+                return _cast_to_specific_interface(existing, "Attribute"), False
+        except Exception:
+            pass
+        try:
+            existing = _collection_item_by_name(type_element.attributes, name)
+            if existing is not None:
+                return _cast_to_specific_interface(existing, "Attribute"), False
+        except Exception:
+            pass
+
+        attribute = type_element.addAttribute(name)
+        if attribute is None:
+            raise RuntimeError(f"Rhapsody failed to create attribute '{name}'")
+        return _cast_to_specific_interface(attribute, "Attribute"), True
+
+    def _get_or_create_enum_literal_in_thread(
+        self,
+        type_element: Any,
+        literal: EnumLiteralSpec,
+    ) -> tuple[Any, bool]:
+        name = sanitize_identifier(literal.name)
+        try:
+            existing = _collection_item_by_name(type_element.enumerationLiterals, name)
+            if existing is not None:
+                return _cast_to_specific_interface(existing, "EnumerationLiteral"), False
+        except Exception:
+            pass
+
+        item = type_element.addEnumerationLiteral(name)
+        if item is None:
+            raise RuntimeError(f"Rhapsody failed to create enumeration literal '{name}'")
+        return _cast_to_specific_interface(item, "EnumerationLiteral"), True
+
+    def _sync_type_attributes_in_thread(
+        self,
+        type_element: Any,
+        attributes: list[TypeMemberSpec],
+    ) -> None:
+        for member in attributes:
+            attribute, _ = self._get_or_create_type_attribute_in_thread(
+                type_element,
+                member,
+            )
+            self._assign_type_in_thread(attribute, member.type_info, "Attribute")
+
+    def _sync_enum_literals_in_thread(
+        self,
+        type_element: Any,
+        literals: list[EnumLiteralSpec],
+    ) -> None:
+        for literal_spec in literals:
+            literal, _ = self._get_or_create_enum_literal_in_thread(
+                type_element,
+                literal_spec,
+            )
+            if literal_spec.value != "":
+                _set_if_supported(literal, "value", str(literal_spec.value))
+
+    def _sync_typedef_details_in_thread(
+        self,
+        type_element: Any,
+        spec: TypeDefinitionSpec,
+    ) -> None:
+        if spec.basic_type is None:
+            raise ValueError(
+                f"Typedef '{spec.name}' requires basic_type for Details > Basic Type."
+            )
+
+        classifier, _ = self._find_or_create_type_in_thread(spec.basic_type)
+        if classifier is None and spec.basic_type.base_type.strip():
+            target = _resolve_classifier_target(
+                self.context.require_target_in_thread(),
+                "Typedef basic type",
+            )
+            classifier, _ = _get_or_create_element(
+                target,
+                "Type",
+                sanitize_identifier(spec.basic_type.base_type),
+            )
+            _set_if_supported(classifier, "kind", "Language")
+            _set_if_supported(classifier, "declaration", spec.basic_type.base_type)
+        if classifier is not None:
+            _set_if_supported(type_element, "typedefBaseType", classifier)
+        _set_if_supported(type_element, "typedefMultiplicity", spec.multiplicity)
+        _set_if_supported(type_element, "declaration", _type_declaration_text(spec.basic_type))
+
+    def sync_type_definition(self, spec: TypeDefinitionSpec) -> ElementSummary:
+        """Create or update a C Type and fill its kind-specific GUI fields."""
+        def _impl() -> ElementSummary:
+            target = _resolve_classifier_target(
+                self.context.require_target_in_thread(),
+                "Type",
+            )
+            type_element, created = _get_or_create_element(
+                target,
+                "Type",
+                sanitize_identifier(spec.name),
+            )
+            _set_type_kind(type_element, spec.kind)
+
+            # Make the new Type visible to later member type resolution in the same session.
+            self.type_registry._refresh_in_thread()
+
+            if spec.kind in ("struct", "union"):
+                self._sync_type_attributes_in_thread(type_element, spec.attributes)
+            elif spec.kind == "enum":
+                self._sync_enum_literals_in_thread(type_element, spec.literals)
+            else:
+                self._sync_typedef_details_in_thread(type_element, spec)
+
+            self.type_registry._refresh_in_thread()
+            return _element_summary(type_element, created)
+
+        return run_on_com(_impl)
 
     def sync_function(self, spec: FunctionSpec) -> ElementSummary:
         """Create or update a Function or Operation and its ordered arguments."""

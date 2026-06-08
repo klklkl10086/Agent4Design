@@ -457,11 +457,11 @@ class Agent4DesignService:
         )
 
     def sync_model(self, request: ModelSyncRequest) -> ModelSyncResult:
-        """Synchronize macros, variables, and functions through COM."""
+        """Synchronize types, macros, variables, and functions through COM."""
         return self.model_sync_service.sync(request)
 
     def sync_activity(self, request: ActivitySyncRequest) -> ActivitySyncResult:
-        """Generate and import one function-mounted activity XMI artifact."""
+        """Generate and import one standalone activity XMI artifact."""
         if self.activity_sync_service is None:
             raise RuntimeError(
                 "Activity sync is not configured. This is a service startup "
@@ -471,19 +471,9 @@ class Agent4DesignService:
                 "AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true explicitly, or construct "
                 "the service with Agent4DesignService.with_xmi_toolkit(...)."
             )
-        operation_reference = self.repository.resolve_operation_reference(
-            request.function_spec.name
-        )
         return self.activity_sync_service.sync(
             request.function_spec,
             request.graph,
-            operation_xmi_id=operation_reference.xmi_id,
-            operation_path=operation_reference.path,
-            package_name=self.context.target_name,
-            container_xmi_id=operation_reference.container_xmi_id,
-            container_name=operation_reference.container_name,
-            container_meta_class=operation_reference.container_meta_class,
-            container_path=operation_reference.container_path,
         )
 
     def sync(self, request: AgentSyncRequest) -> AgentSyncResult:
@@ -531,6 +521,7 @@ class Agent4DesignService:
     ) -> AgentSyncRequest:
         return AgentSyncRequest(
             model=ModelSyncRequest(
+                types=[],
                 macros=extraction.macros,
                 variables=extraction.variables,
                 functions=extraction.functions,
@@ -612,40 +603,18 @@ class Agent4DesignService:
         """Build a read-only approval plan for semantic and activity writes."""
         model_plan = self.sync_plan_service.plan(request.model)
         activities = []
-        planned_function_names = {
-            sanitize_identifier(function.name)
-            for function in request.model.functions
-        }
         for activity in request.activities:
             function_name = sanitize_identifier(activity.function_spec.name)
-            activity_name = f"activity_{function_name}"
+            activity_name = f"AD_{function_name}"
             try:
                 from agent4design.domain.validators import validate_activity_graph
 
                 validate_activity_graph(activity.graph)
-                operation_path = ""
-                mounted_to_operation = False
-                mount_error = ""
-                if function_name in planned_function_names:
-                    mounted_to_operation = True
-                else:
-                    try:
-                        operation_reference = self.repository.resolve_operation_reference(
-                            activity.function_spec.name
-                        )
-                        operation_path = operation_reference.path
-                        mounted_to_operation = True
-                    except Exception as exc:
-                        mounted_to_operation = False
-                        mount_error = str(exc)
                 activities.append(
                     ActivityPlanItem(
                         function_name=activity.function_spec.name,
                         activity_name=activity_name,
-                        mounted_to_operation=mounted_to_operation,
-                        operation_path=operation_path,
-                        success=mounted_to_operation,
-                        error=mount_error,
+                        success=True,
                     )
                 )
             except Exception as exc:
@@ -691,6 +660,7 @@ class Agent4DesignService:
             verification = self.verify(
                 VerificationRequest(
                     macros=sync_request.model.macros,
+                    types=sync_request.model.types,
                     variables=sync_request.model.variables,
                     functions=sync_request.model.functions,
                     activities=imported_activities,
@@ -745,8 +715,8 @@ class Agent4DesignService:
             ("extract_code_path_model", "Legacy parser/LLM extractor for diagnostics only. Do not use for normal CODE-to-tool JSON modeling unless explicitly requested.", CodePathExtractionRequest),
             ("plan_code_path_modeling", "Legacy automatic code-path extractor plus modeling plan. Prefer read_code_path followed by plan_agent4design_sync.", CodePathModelingRequest),
             ("execute_code_path_modeling", "Legacy automatic code-path extractor plus approved execution. Prefer read_code_path followed by execute_agent4design_sync after approval.", ExecuteCodePathModelingRequest),
-            ("plan_agent4design_sync", "Build a read-only synchronization plan for approval.", AgentSyncRequest),
-            ("execute_agent4design_sync", "Execute an explicitly approved synchronization and verify the result.", ExecuteSyncRequest),
+            ("plan_agent4design_sync", "Build a read-only synchronization plan for types, macros, variables, functions, and activities. Type definitions are written under the selected Class/Block, or under a container only when it has exactly one nested Class/Block.", AgentSyncRequest),
+            ("execute_agent4design_sync", "Execute explicitly approved type/model/activity synchronization and verify the result. Type definitions require a Class/Block target.", ExecuteSyncRequest),
             ("verify_rhapsody_model", "Run read-only verification against the active Rhapsody project.", VerificationRequest),
             ("save_rhapsody_project", "Save the active Rhapsody project after explicit approval.", ApprovalRequest),
         ]

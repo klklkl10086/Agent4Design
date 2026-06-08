@@ -214,6 +214,17 @@ def _source_files(request: CodePathExtractionRequest) -> List[Path]:
     )
 
 
+def _decode_source_bytes(data: bytes) -> tuple[str, str, str]:
+    encodings = ("utf-8-sig", "utf-8", "gbk", "gb2312", "latin-1")
+    last_error = ""
+    for encoding in encodings:
+        try:
+            return data.decode(encoding), encoding, ""
+        except UnicodeDecodeError as exc:
+            last_error = str(exc)
+    return data.decode("utf-8", errors="replace"), "utf-8-replace", last_error
+
+
 def _language_for_path(path: Path) -> CodeLanguage:
     suffix = path.suffix.lower()
     if suffix == ".c":
@@ -501,8 +512,13 @@ def segment_code_path(
                 warnings.append(f"Skipped oversized source file: {path}")
                 continue
 
-            source = path.read_text(encoding="utf-8", errors="replace")
-            summary.bytes_read = len(source.encode("utf-8", errors="replace"))
+            data = path.read_bytes()
+            source, encoding, decode_error = _decode_source_bytes(data)
+            summary.bytes_read = len(data)
+            if decode_error:
+                warnings.append(
+                    f"{path}: decoded with {encoding}; last decode error was {decode_error}"
+                )
             file_segments = resolved_segmenter.segment_file(path, source, request)
             for segment in file_segments:
                 if len(segment.source) > request.max_segment_chars:

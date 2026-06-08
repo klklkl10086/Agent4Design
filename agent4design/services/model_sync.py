@@ -11,13 +11,14 @@ from agent4design.domain.models import (
     FunctionSpec,
     MacroSpec,
     StrictModel,
+    TypeDefinitionSpec,
     VariableSpec,
 )
 from agent4design.rhapsody.context import RhapsodyContext, rhapsody_context
 from agent4design.rhapsody.repository import RhapsodyRepository, rhapsody_repository
 
 
-ElementKind = Literal["macro", "variable", "function"]
+ElementKind = Literal["type", "macro", "variable", "function"]
 
 
 class ElementSyncResult(StrictModel):
@@ -33,6 +34,7 @@ class ElementSyncResult(StrictModel):
 class ModelSyncRequest(StrictModel):
     """Semantic C elements to synchronize in deterministic order."""
 
+    types: List[TypeDefinitionSpec] = Field(default_factory=list)
     macros: List[MacroSpec] = Field(default_factory=list)
     variables: List[VariableSpec] = Field(default_factory=list)
     functions: List[FunctionSpec] = Field(default_factory=list)
@@ -64,6 +66,10 @@ class ModelSyncService:
         """Synchronize one macro representation."""
         return self.repository.sync_macro(spec)
 
+    def sync_type_definition(self, spec: TypeDefinitionSpec) -> ElementSummary:
+        """Synchronize one C type definition."""
+        return self.repository.sync_type_definition(spec)
+
     def sync_variable(self, spec: VariableSpec) -> ElementSummary:
         """Synchronize one C variable or class attribute."""
         return self.repository.sync_variable(spec)
@@ -75,7 +81,9 @@ class ModelSyncService:
     def _sync_item(self, kind: ElementKind, spec: object) -> ElementSyncResult:
         name = getattr(spec, "name", "")
         try:
-            if kind == "macro":
+            if kind == "type":
+                element = self.sync_type_definition(spec)  # type: ignore[arg-type]
+            elif kind == "macro":
                 element = self.sync_macro(spec)  # type: ignore[arg-type]
             elif kind == "variable":
                 element = self.sync_variable(spec)  # type: ignore[arg-type]
@@ -96,10 +104,11 @@ class ModelSyncService:
             )
 
     def sync(self, request: ModelSyncRequest) -> ModelSyncResult:
-        """Synchronize macros, variables, then functions and optionally save."""
+        """Synchronize types, macros, variables, then functions and optionally save."""
         items: List[ElementSyncResult] = []
         ordered_specs = (
-            [("macro", spec) for spec in request.macros]
+            [("type", spec) for spec in request.types]
+            + [("macro", spec) for spec in request.macros]
             + [("variable", spec) for spec in request.variables]
             + [("function", spec) for spec in request.functions]
         )

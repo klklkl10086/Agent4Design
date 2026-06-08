@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import subprocess
+import time
 from typing import List, Optional, Union
 
 from pydantic import BaseModel
@@ -117,7 +118,8 @@ def import_xmi_folder(
     if not folder_path.is_dir():
         raise FileNotFoundError(f"XMI folder not found: {folder_path}")
 
-    return [
-        import_xmi_file(xmi_path, toolkit_bat, log_dir, timeout)
-        for xmi_path in sorted(folder_path.glob("*.xmi"))
-    ]
+    results = []
+    for xmi_path in sorted(folder_path.glob("*.xmi")):
+        results.append(import_xmi_file(xmi_path, toolkit_bat, log_dir, timeout))
+        time.sleep(1)
+    return results

@@ -200,7 +200,7 @@ def create_mcp_server(
         request: Dict[str, Any],
         auth_token: str = "",
     ) -> Dict[str, Any]:
-        """Build a read-only plan for functions, variables, macros, and activities."""
+        """Build a read-only plan for types, macros, variables, functions, and activities."""
         require_token(auth_token)
         return _dump(agent_service.call("plan_agent4design_sync", request))
 

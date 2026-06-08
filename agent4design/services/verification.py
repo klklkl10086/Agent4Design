@@ -6,7 +6,13 @@ from typing import List
 
 from pydantic import Field
 
-from agent4design.domain.models import FunctionSpec, MacroSpec, StrictModel, VariableSpec
+from agent4design.domain.models import (
+    FunctionSpec,
+    MacroSpec,
+    StrictModel,
+    TypeDefinitionSpec,
+    VariableSpec,
+)
 from agent4design.rhapsody.verifier import (
     RhapsodyVerifier,
     VerificationReport,
@@ -17,6 +23,7 @@ from agent4design.rhapsody.verifier import (
 class VerificationRequest(StrictModel):
     """Expected Rhapsody elements to check after synchronization."""
 
+    types: List[TypeDefinitionSpec] = Field(default_factory=list)
     macros: List[MacroSpec] = Field(default_factory=list)
     variables: List[VariableSpec] = Field(default_factory=list)
     functions: List[FunctionSpec] = Field(default_factory=list)
@@ -32,6 +39,7 @@ class VerificationService:
     def verify(self, request: VerificationRequest) -> VerificationReport:
         """Run read-only checks against the active Rhapsody project."""
         return self.verifier.verify(
+            types=request.types,
             macros=request.macros,
             variables=request.variables,
             functions=request.functions,

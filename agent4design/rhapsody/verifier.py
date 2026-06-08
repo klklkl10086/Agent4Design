@@ -12,6 +12,7 @@ from agent4design.domain.models import (
     FunctionSpec,
     MacroSpec,
     StrictModel,
+    TypeDefinitionSpec,
     VariableSpec,
 )
 from agent4design.rhapsody.com_runtime import run_on_com
@@ -19,12 +20,14 @@ from agent4design.rhapsody.context import RhapsodyContext, rhapsody_context
 from agent4design.rhapsody.repository import (
     _element_path,
     _find_child,
+    _resolve_classifier_target,
+    _type_kind_matches,
     get_sync_meta_class,
 )
 from agent4design.tools.tool import sanitize_identifier
 
 
-VerificationKind = Literal["macro", "variable", "function", "activity"]
+VerificationKind = Literal["type", "macro", "variable", "function", "activity"]
 
 
 class VerificationItem(StrictModel):
@@ -188,6 +191,41 @@ class RhapsodyVerifier:
             details={"meta_class": meta_class, "return_type": actual_return},
         )
 
+    def _verify_type_in_thread(self, spec: TypeDefinitionSpec) -> VerificationItem:
+        target = _resolve_classifier_target(
+            self.context.require_target_in_thread(),
+            "Type verification",
+        )
+        type_element = _find_child(target, "Type", sanitize_identifier(spec.name))
+        if type_element is None:
+            return VerificationItem(
+                kind="type",
+                name=spec.name,
+                success=False,
+                errors=["Type was not found under the selected target."],
+            )
+
+        warnings = []
+        matches = _type_kind_matches(type_element, spec.kind)
+        if matches is None:
+            warnings.append("Type kind could not be read through the COM helper.")
+        errors = []
+        if matches is False:
+            errors.append(f"Type kind differs from expected '{spec.kind}'.")
+
+        return VerificationItem(
+            kind="type",
+            name=spec.name,
+            success=not errors,
+            path=_element_path(type_element),
+            errors=errors,
+            warnings=warnings,
+            details={
+                "meta_class": "Type",
+                "kind": getattr(type_element, "kind", ""),
+            },
+        )
+
     def _verify_activity_in_thread(self, activity_name: str) -> VerificationItem:
         self.context.ensure_connection_in_thread()
         project = self.context.project
@@ -214,6 +252,7 @@ class RhapsodyVerifier:
     def verify(
         self,
         *,
+        types: List[TypeDefinitionSpec] | None = None,
         macros: List[MacroSpec] | None = None,
         variables: List[VariableSpec] | None = None,
         functions: List[FunctionSpec] | None = None,
@@ -222,6 +261,10 @@ class RhapsodyVerifier:
         """Verify expected semantic elements and standalone activities."""
         def _impl() -> VerificationReport:
             items = [
+                *[
+                    self._verify_type_in_thread(spec)
+                    for spec in (types or [])
+                ],
                 *[
                     self._verify_macro_in_thread(spec)
                     for spec in (macros or [])

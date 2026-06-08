@@ -59,11 +59,7 @@ class ActivitySyncService:
             function_spec,
             graph,
             self.output_dir,
-            operation_xmi_id=operation_xmi_id,
             package_name=package_name,
-            container_xmi_id=container_xmi_id,
-            container_name=container_name,
-            container_meta_class=container_meta_class,
         )
         import_result = import_xmi_file(
             xmi_path,
@@ -73,7 +69,7 @@ class ActivitySyncService:
         )
         return ActivitySyncResult(
             function_name=function_spec.name,
-            activity_name=f"activity_{sanitize_identifier(function_spec.name)}",
+            activity_name=f"AD_{sanitize_identifier(function_spec.name)}",
             operation_path=operation_path,
             operation_xmi_id=operation_xmi_id,
             container_path=container_path,

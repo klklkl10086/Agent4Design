@@ -85,14 +85,13 @@ AGENT4DESIGN_LLM_API_KEY=你的API密钥
 AGENT4DESIGN_LLM_MODEL=你的OpenAI兼容模型名
 AGENT4DESIGN_LLM_BASE_URL=https://你的OpenAI兼容接口
 ```
-
-可选的活动图 XMI 导入配置：
+活动图 XMI 导入配置：
 
 ```dotenv
 AGENT4DESIGN_ENABLE_ACTIVITY_IMPORT=true
-AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat 
-AGENT4DESIGN_XMI_OUTPUT_DIR=xmi_read
-AGENT4DESIGN_XMI_LOG_DIR=xmi_import_logs
+AGENT4DESIGN_XMI_TOOLKIT_BAT=C:\path\to\XMI4Rhapsody.bat #本机XMI4Rhapsody.bat脚本的所在地址，需要自己确认
+AGENT4DESIGN_XMI_OUTPUT_DIR=xmi_read                     #生成的XMI文件存放位置
+AGENT4DESIGN_XMI_LOG_DIR=xmi_import_logs                 #XMI操作日志存放位置
 AGENT4DESIGN_XMI_TIMEOUT=600
 ```
 
@@ -109,8 +108,6 @@ AGENT4DESIGN_LLM_SSL_VERIFY=true
 AGENT4DESIGN_LLM_CA_BUNDLE=C:\path\to\ca.pem
 ```
 
-写在 `.env` 中时，也兼容旧变量名，例如 `API_TOKEN`、`BASE_URL`、
-`VIO_HEADERS`。
 
 ### 交互式 Agent
 
@@ -128,11 +125,6 @@ agent4design-agent
 agent4design-agent --allow-writes
 ```
 
-也可以使用模块启动方式：
-
-```powershell
-python -m agent4design.adapters.llm --allow-writes
-```
 
 CLI 启动时会自动连接当前 Rhapsody 项目，读取当前 GUI 选中目标，并刷新已知类型
 索引。写入工具只在启动参数包含 `--allow-writes` 时可用。
@@ -160,7 +152,7 @@ Agent4Design 当前支持以下模型元素：
   Agent4Design 只会在其中恰好存在唯一一个嵌套 Class/Block 时自动下钻。
 - 函数：作为 Rhapsody Operation 写入选中的 Class 或 Block。
 - 变量和宏：根据 repository 映射写入当前选中目标。
-- 活动图：作为独立 XMI 包导入，命名为 `AD_<function_name>`。
+- 活动图：作为独立 XMI 包导入，命名为 `activity_<function_name>`。
 
 `model.types` 示例：
 

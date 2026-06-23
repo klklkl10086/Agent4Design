@@ -19,7 +19,6 @@ XMI Toolkit 生成并导入为独立 XMI 包。
 - 使用 Rhapsody COM 写入时，需要安装 `rhapsody` extra，其中包含 `pywin32`。
 - 读取和分段 C/H 代码时，需要安装 `parser` extra。
 - 使用交互式 LLM Agent 时，需要安装 `llm` extra。
-- 使用 MCP 时，需要安装 `mcp` extra。
 
 ### 从源码安装
 
@@ -29,44 +28,6 @@ XMI Toolkit 生成并导入为独立 XMI 包。
 python -m pip install -e ".[rhapsody,parser,llm]"
 ```
 
-安装所有主要适配器：
-
-```powershell
-python -m pip install -e ".[rhapsody,parser,llm,mcp]"
-```
-
-开发环境：
-
-```powershell
-python -m pip install -e ".[rhapsody,parser,llm,mcp,graph,dev]"
-```
-
-### 从 wheel 包安装
-
-在发布机器上构建 wheel：
-
-```powershell
-python -m pip install build
-python -m build
-```
-
-在目标机器上安装生成的 wheel：
-
-```powershell
-python -m pip install .\dist\agent4design-0.1.0-py3-none-any.whl
-python -m pip install "pywin32>=306" "tree-sitter>=0.24,<0.26" "tree-sitter-c>=0.23,<0.25" "openai>=1,<3" "mcp[cli]>=1,<2"
-```
-
-如果要给其他人安装即用，建议准备一个发布目录：
-
-```text
-release/
-  dist/agent4design-0.1.0-py3-none-any.whl
-  install.ps1
-  .env.example
-  README.md
-  README.zh-CN.md
-```
 
 ### 配置
 
@@ -114,12 +75,6 @@ AGENT4DESIGN_LLM_CA_BUNDLE=C:\path\to\ca.pem
 
 先打开 IBM Rhapsody，加载目标项目，并在 Rhapsody 浏览器中选中目标模型元素。
 
-只读模式：
-
-```powershell
-agent4design-agent
-```
-
 允许写入模式：
 
 ```powershell
@@ -128,14 +83,14 @@ agent4design-agent --allow-writes
 
 
 CLI 启动时会自动连接当前 Rhapsody 项目，读取当前 GUI 选中目标，并刷新已知类型
-索引。写入工具只在启动参数包含 `--allow-writes` 时可用。
+索引。
 
 推荐交互流程：
 
 ```text
 打开 Rhapsody
 加载目标项目
-选中目标 Class、Block、File、Package 或 Module
+选中目标 Class
 启动 agent4design-agent --allow-writes
 让 Agent4Design 读取 C/H 文件或目录
 检查同步计划
@@ -193,211 +148,10 @@ Agent4Design 当前支持以下模型元素：
 活动图中 Action 的代码会写入 UML action body，同时写入 Rhapsody
 OpaqueAction 的 model-element description 扩展。
 
-## MCP 和 HTTP
 
-MCP 和 HTTP 都是同一个 Agent4Design 服务的不同适配器。两者都必须运行在打开
-IBM Rhapsody 的 Windows 机器上，因为 Rhapsody COM 操作必须在本机桌面会话中执行。
-
-### MCP：本地 stdio
-
-当 MCP 客户端和 Rhapsody 在同一台机器上时，使用 stdio：
-
-```powershell
-agent4design-mcp --transport stdio
-```
-
-典型 MCP 客户端配置：
-
-```json
-{
-  "mcpServers": {
-    "agent4design": {
-      "command": "agent4design-mcp",
-      "args": ["--transport", "stdio"]
-    }
-  }
-}
-```
-
-等价的模块启动方式：
-
-```powershell
-python -m agent4design.adapters.mcp --transport stdio
-```
-
-### MCP：streamable HTTP
-
-当另一台机器上的 MCP 客户端需要连接到 Rhapsody 机器时，使用 streamable HTTP：
-
-```powershell
-agent4design-mcp `
-  --transport streamable-http `
-  --host 0.0.0.0 `
-  --port 8766 `
-  --path /mcp `
-  --token your-secret-token
-```
-
-等价 `.env` 配置：
-
-```dotenv
-AGENT4DESIGN_MCP_TRANSPORT=streamable-http
-AGENT4DESIGN_MCP_HOST=0.0.0.0
-AGENT4DESIGN_MCP_PORT=8766
-AGENT4DESIGN_MCP_PATH=/mcp
-AGENT4DESIGN_MCP_TOKEN=your-secret-token
-```
-
-远程客户端连接地址：
-
-```text
-http://<rhapsody-machine-ip>:8766/mcp
-```
-
-配置 token 后，工具参数中需要带上 `auth_token`：
-
-```json
-{
-  "auth_token": "your-secret-token"
-}
-```
-
-写入工具还需要 `approved=true`：
-
-```json
-{
-  "approved": true,
-  "auth_token": "your-secret-token"
-}
-```
-
-### MCP 工具流程
-
-推荐 MCP 调用顺序：
-
-1. 打开 Rhapsody 并加载项目。
-2. 在 Rhapsody 中选中目标模型元素。
-3. 调用 `initialize_rhapsody`。
-4. 调用 `refresh_type_registry`。
-5. 如果客户端需要源码文本分块，调用 `read_code_path`。
-6. 调用 `plan_agent4design_sync`。
-7. 检查计划结果。
-8. 调用 `execute_agent4design_sync`，并传入 `approved=true`。
-9. 需要保存时调用 `save_rhapsody_project`，并传入 `approved=true`。
-
-常用 MCP 工具：
-
-```text
-initialize_rhapsody
-select_rhapsody_target
-get_rhapsody_context
-refresh_type_registry
-read_code_path
-plan_agent4design_sync
-execute_agent4design_sync
-verify_rhapsody_model
-save_rhapsody_project
-```
-
-### HTTP API
-
-启动 HTTP API：
-
-```powershell
-agent4design-api --host 127.0.0.1 --port 8765
-```
-
-等价的模块启动方式：
-
-```powershell
-python -m agent4design.adapters.http --host 127.0.0.1 --port 8765
-```
-
-如果 HTTP API 监听非本机地址，需要配置 token：
-
-```dotenv
-AGENT4DESIGN_API_TOKEN=your-secret-token
-```
-
-请求时可以使用以下任一 header：
-
-```text
-Authorization: Bearer your-secret-token
-```
-
-或：
-
-```text
-X-Agent4Design-Token: your-secret-token
-```
-
-HTTP 路由：
-
-| 方法 | 路由 | 用途 |
-| --- | --- | --- |
-| `GET` | `/health` | 检查 HTTP 进程是否运行。 |
-| `GET` | `/tools` | 列出工具和 JSON schema。 |
-| `POST` | `/call` | 使用 `{ "name": "...", "arguments": {} }` 调用工具。 |
-| `POST` | `/tools/{name}` | 直接调用某个工具，请求体就是工具参数。 |
-
-初始化 Rhapsody：
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8765/tools/initialize_rhapsody `
-  -ContentType application/json `
-  -Body (@{ select_current_target = $true } | ConvertTo-Json)
-```
-
-规划同步：
-
-```powershell
-$request = @{
-  model = @{
-    types = @()
-    macros = @()
-    variables = @()
-    functions = @(
-      @{
-        name = "add"
-        arguments = @(
-          @{ name = "a"; type_info = @{ base_type = "int" } },
-          @{ name = "b"; type_info = @{ base_type = "int" } }
-        )
-        return_type_info = @{ base_type = "int" }
-      }
-    )
-  }
-}
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8765/tools/plan_agent4design_sync `
-  -ContentType application/json `
-  -Body ($request | ConvertTo-Json -Depth 20)
-```
-
-执行已批准的同步：
-
-```powershell
-Invoke-RestMethod `
-  -Method Post `
-  -Uri http://127.0.0.1:8765/tools/execute_agent4design_sync `
-  -ContentType application/json `
-  -Body (@{
-    request = $request
-    approved = $true
-    verify_after_sync = $true
-  } | ConvertTo-Json -Depth 20)
-```
 
 ### 安全建议
 
-- 不要把 MCP 或 HTTP 直接暴露到公网。
-- 远程访问优先使用 VPN 或可信局域网。
-- 非 localhost 服务请配置 `AGENT4DESIGN_MCP_TOKEN` 或
-  `AGENT4DESIGN_API_TOKEN`。
 - 同一个 Rhapsody 项目建议一次只执行一个会修改模型的任务。
 - 不要把真实 `.env` 发给别人；只共享 `.env.example`。
 
@@ -468,8 +222,8 @@ python -m agent4design.adapters.http
 ### 当前限制和后续方向
 
 - 普通 COM 写入仍依赖 Rhapsody 当前选中目标。
-- Type 定义需要 Class/Block 目标，或者需要当前容器中恰好只有一个嵌套
-  Class/Block。
+- Type 定义需要 Class 目标，或者需要当前容器中恰好只有一个嵌套
+  Class。
 - 活动图当前作为独立活动图包导入。
 - 后续希望支持目录级自动建模：传入包含大量 `.c` 和 `.h` 文件的目录后，
   自动识别每个文件对应的 Rhapsody 包裹和文件元素位置。
@@ -493,5 +247,7 @@ Root
 ```text
 CD_AppMain.c
   -> package: CD_App_Main
-  -> main target: CD_App_Main -> Files -> CD_AppMain
+    -> main target: CD_App_Main
+       -> Files
+          -> CD_AppMain
 ```

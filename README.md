@@ -5,7 +5,7 @@ C/H 代码、结构化 JSON 请求、MCP 客户端或 HTTP API 创建和更新 R
 元素。普通语义模型元素通过 Rhapsody COM API 写入，活动图通过 IBM Rhapsody
 XMI Toolkit 生成并导入为独立 XMI 包。
 
-英文文档：[README.md](README.md)
+英文文档：[README.md](README.en-EN.md)
 
 ## 安装和使用
 

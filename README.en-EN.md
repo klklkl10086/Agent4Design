@@ -6,7 +6,7 @@ or a small HTTP API. Normal semantic model elements are written through the
 Rhapsody COM API. Activity diagrams are generated as standalone XMI packages
 and imported through the IBM Rhapsody XMI Toolkit.
 
-Chinese documentation: [README.zh-CN.md](README.zh-CN.md)
+Chinese documentation: [README.zh-CN.md](README.md)
 
 ## Installation And Usage
 
